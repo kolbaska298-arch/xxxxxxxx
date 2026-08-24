@@ -1,9 +1,8 @@
 .env
-.env.*
-.git/
+.git
 .gitignore
-applications.db
-__pycache__/
+__pycache__
 *.py[cod]
-.venv/
-*.log
+.venv
+venv
+README.md
