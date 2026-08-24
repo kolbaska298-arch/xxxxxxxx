@@ -1,0 +1,9 @@
+.env
+.env.*
+.git/
+.gitignore
+applications.db
+__pycache__/
+*.py[cod]
+.venv/
+*.log

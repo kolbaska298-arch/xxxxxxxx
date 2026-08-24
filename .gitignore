@@ -1,0 +1,11 @@
+.env
+.env.local
+.env.*.local
+__pycache__/
+*.py[cod]
+applications.db
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
