@@ -342,6 +342,8 @@ async def chat_info_handler(callback: CallbackQuery, bot: Bot) -> None:
     try:
         chat = await bot.get_chat(chat_id)
         member_count = await bot.get_chat_member_count(chat_id)
+        administrators = await bot.get_chat_administrators(chat_id)
+        bot_member = await bot.get_chat_member(chat_id, (await bot.get_me()).id)
     except (TelegramBadRequest, TelegramForbiddenError) as error:
         logger.warning("Could not inspect chat %s: %s", chat_id, error)
         await callback.answer("Не удалось получить информацию о чате.", show_alert=True)
@@ -349,6 +351,17 @@ async def chat_info_handler(callback: CallbackQuery, bot: Bot) -> None:
 
     username = f"@{chat.username}" if chat.username else "нет"
     description = chat.description or "нет"
+    admin_lines = []
+    for administrator in administrators:
+        user = administrator.user
+        name = f"@{user.username}" if user.username else user.full_name
+        title = f" ({administrator.custom_title})" if administrator.custom_title else ""
+        admin_lines.append(f"- {name} | ID: {user.id} | статус: {administrator.status}{title}")
+    permissions = getattr(bot_member, "can_restrict_members", None)
+    invite_link = getattr(chat, "invite_link", None) or "нет"
+    linked_chat_id = getattr(chat, "linked_chat_id", None) or "нет"
+    slow_mode = getattr(chat, "slow_mode_delay", None)
+    slow_mode_text = f"{slow_mode} сек." if slow_mode is not None else "выключен"
     text = (
         "Информация о чате\n\n"
         f"Название: {chat.title or 'нет'}\n"
@@ -357,12 +370,18 @@ async def chat_info_handler(callback: CallbackQuery, bot: Bot) -> None:
         f"Username: {username}\n"
         f"Участников: {member_count}\n"
         f"Описание: {description}\n\n"
-        "Telegram Bot API не передаёт список всех участников "
-        "их дату регистрации или дату вступления в чат."
+        f"Ссылка-приглашение: {invite_link}\n"
+        f"Связанный чат: {linked_chat_id}\n"
+        f"Медленный режим: {slow_mode_text}\n"
+        f"Бот может ограничивать: {'да' if permissions else 'нет'}\n\n"
+        "Администраторы:\n"
+        f"{chr(10).join(admin_lines) if admin_lines else 'нет'}"
     )
     await callback.answer()
-    if callback.message:
-        await callback.message.answer(text)
+    try:
+        await bot.send_message(chat_id, text)
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not send chat information to %s: %s", chat_id, error)
 
 
 @router.message(Command("chatid", "айди"))
