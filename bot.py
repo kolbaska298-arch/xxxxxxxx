@@ -185,6 +185,23 @@ async def punish_violation(bot: Bot, message: Message, reason: str) -> None:
     await mute_user(bot, message, 10, reason)
 
 
+def full_chat_permissions() -> ChatPermissions:
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_react_to_messages=True,
+        can_invite_users=True,
+    )
+
+
 @router.message(Command("start"))
 async def start_handler(message: Message) -> None:
     await message.answer(
@@ -203,6 +220,12 @@ async def help_handler(message: Message) -> None:
         "Автоматически: приветствует новых участников, защищает от флуда "
         "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA."
     )
+
+
+@router.message(Command("chatid", "айди"))
+async def chat_id_handler(message: Message) -> None:
+    if is_group(message):
+        await message.answer(f"ID этого чата: {message.chat.id}")
 
 
 @router.chat_member()
@@ -422,10 +445,90 @@ async def muted_list_handler(message: Message, bot: Bot) -> None:
         await message.answer("Сейчас активных мутов нет.")
         return
     lines = ["Активные муты:"]
+    buttons = []
     for mute in sorted(chat_mutes, key=lambda item: item.until):
         end_time = mute.until.astimezone().strftime("%d.%m.%Y %H:%M:%S")
         lines.append(f"- {mute.display_name} до {end_time}")
-    await message.answer("\n".join(lines))
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"Размутить {mute.display_name}",
+                callback_data=f"unmute:{mute.chat_id}:{mute.user_id}",
+            )
+        ])
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("unmute:"))
+async def unmute_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+    try:
+        _, chat_id_text, user_id_text = callback.data.split(":")
+        chat_id = int(chat_id_text)
+        user_id = int(user_id_text)
+    except (AttributeError, ValueError):
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    if callback.message.chat.id != chat_id:
+        await callback.answer("Кнопка относится к другой группе.", show_alert=True)
+        return
+    try:
+        member = await bot.get_chat_member(chat_id, callback.from_user.id)
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not inspect unmute actor %s: %s", callback.from_user.id, error)
+        await callback.answer("Не удалось проверить права.", show_alert=True)
+        return
+    if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+        await callback.answer("Размутить может только администратор.", show_alert=True)
+        return
+
+    if (chat_id, user_id) not in active_mutes:
+        await callback.answer("Этот мут уже снят или истёк.", show_alert=True)
+        return
+    try:
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=full_chat_permissions(),
+        )
+        active_mutes.pop((chat_id, user_id), None)
+        await callback.message.edit_text("Мут снят администратором.")
+        await callback.answer("Пользователь размучен.")
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not unmute user %s in chat %s: %s", user_id, chat_id, error)
+        await callback.answer("Не удалось снять мут.", show_alert=True)
+
+
+async def terminal_sender(bot: Bot) -> None:
+    print("Консольная отправка: введите chat_id|сообщение (Ctrl+C для выхода).")
+    while True:
+        try:
+            command = await asyncio.to_thread(input, "> ")
+        except (EOFError, KeyboardInterrupt):
+            return
+        if "|" not in command:
+            print("Формат: chat_id|сообщение")
+            continue
+        chat_id_text, text = command.split("|", 1)
+        try:
+            chat_id = int(chat_id_text.strip())
+        except ValueError:
+            print("chat_id должен быть числом.")
+            continue
+        text = text.strip()
+        if not text:
+            print("Сообщение не может быть пустым.")
+            continue
+        try:
+            await bot.send_message(chat_id, text)
+            print("Сообщение отправлено.")
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.warning("Could not send terminal message to %s: %s", chat_id, error)
+            print("Не удалось отправить сообщение: проверьте chat_id и права бота.")
 
 
 @router.message(F.text)
@@ -525,9 +628,11 @@ async def main() -> None:
     bot = Bot(token=token)
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
+    terminal_task = asyncio.create_task(terminal_sender(bot))
     try:
         await dispatcher.start_polling(bot)
     finally:
+        terminal_task.cancel()
         await bot.session.close()
 
 
