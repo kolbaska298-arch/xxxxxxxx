@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import random
@@ -6,6 +7,7 @@ import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ChatMemberStatus, ChatType
@@ -46,6 +48,7 @@ JOIN_WINDOW = timedelta(seconds=60)
 RAID_RESTRICTION = timedelta(minutes=5)
 CAPTCHA_RESTRICTION = timedelta(minutes=5)
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+CHAT_STORE = Path(os.getenv("CHAT_STORE", "known_chats.json"))
 
 
 def utc_now() -> datetime:
@@ -73,6 +76,12 @@ join_events: dict[int, deque[tuple[datetime, int]]] = defaultdict(deque)
 raid_until: dict[int, datetime] = {}
 raid_alert_sent: dict[int, datetime] = {}
 pending_captcha: dict[tuple[int, int], datetime] = {}
+known_chats: set[int] = set()
+
+try:
+    known_chats.update(int(chat_id) for chat_id in json.loads(CHAT_STORE.read_text(encoding="utf-8")))
+except (FileNotFoundError, OSError, TypeError, ValueError):
+    pass
 
 router = Router()
 
@@ -202,15 +211,50 @@ def full_chat_permissions() -> ChatPermissions:
     )
 
 
+def owner_update_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Обновление 0.7", callback_data="show_update_07")],
+            [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
+        ]
+    )
+
+
+def remember_chat(chat_id: int) -> None:
+    if chat_id in known_chats:
+        return
+    known_chats.add(chat_id)
+    try:
+        CHAT_STORE.write_text(json.dumps(sorted(known_chats)), encoding="utf-8")
+    except OSError as error:
+        logger.warning("Could not save known chat %s: %s", chat_id, error)
+
+
+UPDATE_07_TEXT = (
+    "Обновление Anti-graviti 0.7\n\n"
+    "- исправлен список мутов и CAPTCHA\n"
+    "- добавлена кнопка размуты\n"
+    "- добавлена CAPTCHA для новых участников\n"
+    "- усилена защита от ссылок и флуда\n"
+    "- добавлена защита от массового входа\n"
+    "- добавлена защита от массовых киков\n"
+    "- добавлены команды /help /chatid /send и /sendhere\n\n"
+    "by Anti-graviti"
+)
+
+
 @router.message(Command("start"))
 async def start_handler(message: Message) -> None:
+    reply_markup = owner_update_keyboard() if message.from_user and message.from_user.id == OWNER_ID else None
     await message.answer(
-        "Anti-graviti активен. Используйте /help, чтобы посмотреть команды."
+        "Anti-graviti активен. Используйте /help, чтобы посмотреть команды.",
+        reply_markup=reply_markup,
     )
 
 
 @router.message(Command("help", "помощь"))
 async def help_handler(message: Message) -> None:
+    reply_markup = owner_update_keyboard() if message.from_user and message.from_user.id == OWNER_ID else None
     await message.answer(
         "Anti-graviti\n\n"
         "/start - запустить бота\n"
@@ -220,8 +264,43 @@ async def help_handler(message: Message) -> None:
         "/send chat_id текст - отправить сообщение от бота\n"
         "/sendhere текст - отправить сообщение в текущую группу\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
-        "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA."
+        "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA.",
+        reply_markup=reply_markup,
     )
+
+
+@router.callback_query(F.data == "show_update_07")
+async def update_07_handler(callback: CallbackQuery) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(UPDATE_07_TEXT)
+
+
+@router.callback_query(F.data == "publish_update_07")
+async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+
+    await callback.answer("Начинаю публикацию.")
+    sent_count = 0
+    failed_chats = []
+    for chat_id in sorted(known_chats):
+        try:
+            await bot.send_message(chat_id, UPDATE_07_TEXT)
+            sent_count += 1
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            failed_chats.append(chat_id)
+            logger.warning("Could not publish update to %s: %s", chat_id, error)
+
+    if callback.message:
+        result = f"Обновление опубликовано в чатах: {sent_count}."
+        if failed_chats:
+            result += f" Недоступных чатов: {len(failed_chats)}."
+        await callback.message.answer(result)
 
 
 @router.message(Command("chatid", "айди"))
@@ -277,6 +356,7 @@ async def welcome_new_member(event: ChatMemberUpdated, bot: Bot) -> None:
         ChatMemberStatus.CREATOR,
     }:
         return
+    remember_chat(event.chat.id)
 
     name = member_display_name(event)
     now = utc_now()
@@ -477,8 +557,12 @@ async def muted_list_handler(message: Message, bot: Bot) -> None:
     expired = [key for key, mute in active_mutes.items() if mute.until <= now]
     for key in expired:
         active_mutes.pop(key, None)
+    expired_captcha = [key for key, expires_at in pending_captcha.items() if expires_at <= now]
+    for key in expired_captcha:
+        pending_captcha.pop(key, None)
     chat_mutes = [mute for mute in active_mutes.values() if mute.chat_id == message.chat.id]
-    if not chat_mutes:
+    captcha_users = [key for key in pending_captcha if key[0] == message.chat.id]
+    if not chat_mutes and not captcha_users:
         await message.answer("Сейчас активных мутов нет.")
         return
     lines = ["Активные муты:"]
@@ -490,6 +574,14 @@ async def muted_list_handler(message: Message, bot: Bot) -> None:
             InlineKeyboardButton(
                 text=f"Размутить {mute.display_name}",
                 callback_data=f"unmute:{mute.chat_id}:{mute.user_id}",
+            )
+        ])
+    for chat_id, user_id in captcha_users:
+        lines.append(f"- Пользователь {user_id}: ожидает CAPTCHA")
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"Снять ограничение {user_id}",
+                callback_data=f"unmute:{chat_id}:{user_id}",
             )
         ])
     await message.answer(
@@ -523,7 +615,7 @@ async def unmute_handler(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Размутить может только администратор.", show_alert=True)
         return
 
-    if (chat_id, user_id) not in active_mutes:
+    if (chat_id, user_id) not in active_mutes and (chat_id, user_id) not in pending_captcha:
         await callback.answer("Этот мут уже снят или истёк.", show_alert=True)
         return
     try:
@@ -533,6 +625,7 @@ async def unmute_handler(callback: CallbackQuery, bot: Bot) -> None:
             permissions=full_chat_permissions(),
         )
         active_mutes.pop((chat_id, user_id), None)
+        pending_captcha.pop((chat_id, user_id), None)
         await callback.message.edit_text("Мут снят администратором.")
         await callback.answer("Пользователь размучен.")
     except (TelegramBadRequest, TelegramForbiddenError) as error:
@@ -578,6 +671,7 @@ async def bot_insult_handler(message: Message) -> None:
 async def content_handler(message: Message, bot: Bot) -> None:
     if message.from_user is None:
         return
+    remember_chat(message.chat.id)
 
     now = utc_now()
     key = (message.chat.id, message.from_user.id)
