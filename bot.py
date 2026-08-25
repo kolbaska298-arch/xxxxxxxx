@@ -99,14 +99,6 @@ RANDOM_REPLIES = (
     "У меня на это был ответ, но он тоже ушел в мут.",
 )
 
-MARK_REASONS = (
-    "потерялся в правилах",
-    "устроил конфликт",
-    "включил режим амогус",
-    "забыл выключить флуд",
-    "слишком уверенно нарушал порядок",
-)
-
 SUSPICIOUS_LINK_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s]+|(?:t\.me|telegram\.me|telegram\.dog)/[A-Za-z0-9_+/?=-]+",
     re.IGNORECASE,
@@ -202,18 +194,6 @@ async def punish_violation(bot: Bot, message: Message, reason: str) -> None:
     await mute_user(bot, message, 10, reason)
 
 
-@router.message(Command("пометка"))
-async def mark_mute_handler(message: Message, bot: Bot) -> None:
-    if not is_group(message) or message.from_user is None:
-        return
-    await mute_user(
-        bot,
-        message,
-        25,
-        f"получил пометку: {random.choice(MARK_REASONS)}",
-    )
-
-
 def full_chat_permissions() -> ChatPermissions:
     return ChatPermissions(
         can_send_messages=True,
@@ -235,21 +215,8 @@ def owner_update_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
-            [InlineKeyboardButton(text="Информация о чате", callback_data="chat_info_menu")],
         ]
     )
-
-
-def chat_info_keyboard() -> InlineKeyboardMarkup:
-    buttons = []
-    for chat_id in sorted(known_chats):
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"Чат {chat_id}",
-                callback_data=f"chat_info:{chat_id}",
-            )
-        ])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def remember_chat(chat_id: int) -> None:
@@ -331,77 +298,6 @@ async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
         if failed_chats:
             result += f" Недоступных чатов: {len(failed_chats)}."
         await callback.message.answer(result)
-
-
-@router.callback_query(F.data == "chat_info_menu")
-async def chat_info_menu_handler(callback: CallbackQuery) -> None:
-    if callback.from_user is None or callback.from_user.id != OWNER_ID:
-        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
-        return
-    if not known_chats:
-        await callback.answer("Известных чатов пока нет.", show_alert=True)
-        return
-    await callback.answer()
-    if callback.message:
-        await callback.message.answer(
-            "Выберите чат для просмотра доступной информации:",
-            reply_markup=chat_info_keyboard(),
-        )
-
-
-@router.callback_query(F.data.startswith("chat_info:"))
-async def chat_info_handler(callback: CallbackQuery, bot: Bot) -> None:
-    if callback.from_user is None or callback.from_user.id != OWNER_ID:
-        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
-        return
-    try:
-        chat_id = int(callback.data.split(":", 1)[1])
-    except (AttributeError, ValueError):
-        await callback.answer("Некорректный ID чата.", show_alert=True)
-        return
-    try:
-        chat = await bot.get_chat(chat_id)
-        member_count = await bot.get_chat_member_count(chat_id)
-        administrators = await bot.get_chat_administrators(chat_id)
-        bot_member = await bot.get_chat_member(chat_id, (await bot.get_me()).id)
-    except (TelegramBadRequest, TelegramForbiddenError) as error:
-        logger.warning("Could not inspect chat %s: %s", chat_id, error)
-        await callback.answer("Не удалось получить информацию о чате.", show_alert=True)
-        return
-
-    username = f"@{chat.username}" if chat.username else "нет"
-    description = chat.description or "нет"
-    admin_lines = []
-    for administrator in administrators:
-        user = administrator.user
-        name = f"@{user.username}" if user.username else user.full_name
-        title = f" ({administrator.custom_title})" if administrator.custom_title else ""
-        admin_lines.append(f"- {name} | ID: {user.id} | статус: {administrator.status}{title}")
-    permissions = getattr(bot_member, "can_restrict_members", None)
-    invite_link = getattr(chat, "invite_link", None) or "нет"
-    linked_chat_id = getattr(chat, "linked_chat_id", None) or "нет"
-    slow_mode = getattr(chat, "slow_mode_delay", None)
-    slow_mode_text = f"{slow_mode} сек." if slow_mode is not None else "выключен"
-    text = (
-        "Информация о чате\n\n"
-        f"Название: {chat.title or 'нет'}\n"
-        f"ID: {chat.id}\n"
-        f"Тип: {chat.type}\n"
-        f"Username: {username}\n"
-        f"Участников: {member_count}\n"
-        f"Описание: {description}\n\n"
-        f"Ссылка-приглашение: {invite_link}\n"
-        f"Связанный чат: {linked_chat_id}\n"
-        f"Медленный режим: {slow_mode_text}\n"
-        f"Бот может ограничивать: {'да' if permissions else 'нет'}\n\n"
-        "Администраторы:\n"
-        f"{chr(10).join(admin_lines) if admin_lines else 'нет'}"
-    )
-    await callback.answer()
-    try:
-        await bot.send_message(chat_id, text)
-    except (TelegramBadRequest, TelegramForbiddenError) as error:
-        logger.warning("Could not send chat information to %s: %s", chat_id, error)
 
 
 @router.message(Command("chatid", "айди"))
