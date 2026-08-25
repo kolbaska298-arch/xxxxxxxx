@@ -214,7 +214,6 @@ def full_chat_permissions() -> ChatPermissions:
 def owner_update_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Обновление 0.7", callback_data="show_update_07")],
             [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
         ]
     )
@@ -261,8 +260,6 @@ async def help_handler(message: Message) -> None:
         "/help - список команд\n"
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
-        "/send chat_id текст - отправить сообщение от бота\n"
-        "/sendhere текст - отправить сообщение в текущую группу\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
         "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA.",
         reply_markup=reply_markup,
@@ -305,7 +302,7 @@ async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
 
 @router.message(Command("chatid", "айди"))
 async def chat_id_handler(message: Message) -> None:
-    if is_group(message):
+    if is_group(message) and message.from_user and message.from_user.id == OWNER_ID:
         await message.answer(f"ID этого чата: {message.chat.id}")
 
 
