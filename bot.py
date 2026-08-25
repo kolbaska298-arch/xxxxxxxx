@@ -11,7 +11,14 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
-from aiogram.types import ChatMemberUpdated, ChatPermissions, Message
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +44,7 @@ KICK_WINDOW = timedelta(seconds=30)
 JOIN_LIMIT = 5
 JOIN_WINDOW = timedelta(seconds=60)
 RAID_RESTRICTION = timedelta(minutes=5)
+CAPTCHA_RESTRICTION = timedelta(minutes=5)
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 
 
@@ -61,8 +69,10 @@ media_message_events: dict[tuple[int, int], deque[datetime]] = defaultdict(deque
 active_mutes: dict[tuple[int, int], ActiveMute] = {}
 violation_counts: dict[tuple[int, int], int] = defaultdict(int)
 admin_kick_events: dict[tuple[int, int], deque[datetime]] = defaultdict(deque)
-join_events: dict[int, deque[datetime]] = defaultdict(deque)
+join_events: dict[int, deque[tuple[datetime, int]]] = defaultdict(deque)
 raid_until: dict[int, datetime] = {}
+raid_alert_sent: dict[int, datetime] = {}
+pending_captcha: dict[tuple[int, int], datetime] = {}
 
 router = Router()
 
@@ -191,7 +201,7 @@ async def help_handler(message: Message) -> None:
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
-        "стикерами, медиа и массовыми киками."
+        "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA."
     )
 
 
@@ -209,20 +219,49 @@ async def welcome_new_member(event: ChatMemberUpdated, bot: Bot) -> None:
         return
 
     name = member_display_name(event)
+    now = utc_now()
+    joins = join_events[event.chat.id]
+    while joins and now - joins[0][0] > JOIN_WINDOW:
+        joins.popleft()
+    joins.append((now, event.new_chat_member.user.id))
+    unique_joiners = {user_id for _, user_id in joins}
+    raid_active = raid_until.get(event.chat.id, datetime.min.replace(tzinfo=timezone.utc)) > now
+
+    if event.new_chat_member.status == ChatMemberStatus.MEMBER:
+        pending_captcha[(event.chat.id, event.new_chat_member.user.id)] = now + CAPTCHA_RESTRICTION
+        try:
+            await bot.restrict_chat_member(
+                chat_id=event.chat.id,
+                user_id=event.new_chat_member.user.id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=pending_captcha[(event.chat.id, event.new_chat_member.user.id)],
+            )
+            await bot.send_message(
+                event.chat.id,
+                f"{name}, подтвердите, что вы человек, нажав кнопку ниже. Проверка действует 5 минут.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="Я не бот",
+                            callback_data=f"captcha:{event.chat.id}:{event.new_chat_member.user.id}",
+                        )
+                    ]]
+                ),
+            )
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.warning("Could not start captcha for member %s: %s", event.new_chat_member.user.id, error)
+
     greeting = random.choice(WELCOME_MESSAGES).format(name=name)
     try:
-        await bot.send_message(event.chat.id, f"{greeting}\n\nby Anti-graviti")
+        if not raid_active:
+            await bot.send_message(event.chat.id, f"{greeting}\n\nby Anti-graviti")
     except (TelegramBadRequest, TelegramForbiddenError) as error:
         logger.warning("Could not welcome member %s: %s", event.new_chat_member.user.id, error)
         return
 
-    joins = join_events[event.chat.id]
-    now = utc_now()
-    while joins and now - joins[0] > JOIN_WINDOW:
-        joins.popleft()
-    joins.append(now)
-    if len(joins) == JOIN_LIMIT:
+    if len(unique_joiners) >= JOIN_LIMIT and not raid_active:
         raid_until[event.chat.id] = now + RAID_RESTRICTION
+        raid_alert_sent[event.chat.id] = now
         alert = "Anti-graviti: обнаружен возможный рейд, за минуту вошло 5 участников."
         await bot.send_message(event.chat.id, alert)
         if OWNER_ID:
@@ -231,7 +270,10 @@ async def welcome_new_member(event: ChatMemberUpdated, bot: Bot) -> None:
                 f"Группа: {event.chat.title or event.chat.id}\n{alert}",
             )
 
-    if event.chat.id in raid_until and raid_until[event.chat.id] > now:
+    if raid_until.get(event.chat.id, datetime.min.replace(tzinfo=timezone.utc)) <= now:
+        raid_until.pop(event.chat.id, None)
+        raid_alert_sent.pop(event.chat.id, None)
+    elif raid_until[event.chat.id] > now:
         try:
             await bot.restrict_chat_member(
                 chat_id=event.chat.id,
@@ -245,6 +287,54 @@ async def welcome_new_member(event: ChatMemberUpdated, bot: Bot) -> None:
             )
         except (TelegramBadRequest, TelegramForbiddenError) as error:
             logger.warning("Could not restrict new member %s: %s", event.new_chat_member.user.id, error)
+
+
+@router.callback_query(F.data.startswith("captcha:"))
+async def captcha_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+    try:
+        _, chat_id_text, user_id_text = callback.data.split(":")
+        chat_id = int(chat_id_text)
+        user_id = int(user_id_text)
+    except (AttributeError, ValueError):
+        await callback.answer("Некорректная проверка.", show_alert=True)
+        return
+
+    if callback.from_user.id != user_id:
+        await callback.answer("Эта кнопка предназначена для другого участника.", show_alert=True)
+        return
+    expires_at = pending_captcha.get((chat_id, user_id))
+    if expires_at is None or expires_at <= utc_now():
+        pending_captcha.pop((chat_id, user_id), None)
+        await callback.answer("Проверка истекла. Войдите в группу заново.", show_alert=True)
+        return
+
+    try:
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_react_to_messages=True,
+                can_invite_users=True,
+            ),
+        )
+        pending_captcha.pop((chat_id, user_id), None)
+        await callback.message.edit_text("Проверка пройдена. Добро пожаловать в Anti-graviti!")
+        await callback.answer("Готово!")
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not complete captcha for member %s: %s", user_id, error)
+        await callback.answer("Не удалось завершить проверку.", show_alert=True)
 
 
 @router.message(Command("тестприветствие", "testwelcome"))
