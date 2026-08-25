@@ -99,6 +99,14 @@ RANDOM_REPLIES = (
     "У меня на это был ответ, но он тоже ушел в мут.",
 )
 
+MARK_REASONS = (
+    "потерялся в правилах",
+    "устроил конфликт",
+    "включил режим амогус",
+    "забыл выключить флуд",
+    "слишком уверенно нарушал порядок",
+)
+
 SUSPICIOUS_LINK_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s]+|(?:t\.me|telegram\.me|telegram\.dog)/[A-Za-z0-9_+/?=-]+",
     re.IGNORECASE,
@@ -192,6 +200,18 @@ async def punish_violation(bot: Bot, message: Message, reason: str) -> None:
             logger.warning("Could not ban repeat offender %s: %s", message.from_user.id, error)
         return
     await mute_user(bot, message, 10, reason)
+
+
+@router.message(F.text.casefold() == "пометка")
+async def mark_mute_handler(message: Message, bot: Bot) -> None:
+    if not is_group(message) or message.from_user is None:
+        return
+    await mute_user(
+        bot,
+        message,
+        25,
+        f"получил пометку: {random.choice(MARK_REASONS)}",
+    )
 
 
 def full_chat_permissions() -> ChatPermissions:
