@@ -217,6 +217,8 @@ async def help_handler(message: Message) -> None:
         "/help - список команд\n"
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
+        "/send chat_id текст - отправить сообщение от бота\n"
+        "/sendhere текст - отправить сообщение в текущую группу\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
         "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA."
     )
@@ -226,6 +228,41 @@ async def help_handler(message: Message) -> None:
 async def chat_id_handler(message: Message) -> None:
     if is_group(message):
         await message.answer(f"ID этого чата: {message.chat.id}")
+
+
+@router.message(Command("send"))
+async def send_command_handler(message: Message, bot: Bot) -> None:
+    if message.from_user is None or message.from_user.id != OWNER_ID:
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Формат: /send chat_id текст")
+        return
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        await message.answer("chat_id должен быть числом.")
+        return
+    try:
+        await bot.send_message(chat_id, parts[2])
+        await message.answer("Сообщение отправлено.")
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not send owner message to %s: %s", chat_id, error)
+        await message.answer("Не удалось отправить сообщение. Проверьте ID и права бота.")
+
+
+@router.message(Command("sendhere"))
+async def send_here_command_handler(message: Message, bot: Bot) -> None:
+    if not is_group(message) or message.from_user is None or message.from_user.id != OWNER_ID:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Формат: /sendhere текст")
+        return
+    try:
+        await bot.send_message(message.chat.id, parts[1])
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not send owner message to %s: %s", message.chat.id, error)
 
 
 @router.chat_member()
