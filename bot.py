@@ -215,8 +215,21 @@ def owner_update_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
+            [InlineKeyboardButton(text="Информация о чате", callback_data="chat_info_menu")],
         ]
     )
+
+
+def chat_info_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    for chat_id in sorted(known_chats):
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"Чат {chat_id}",
+                callback_data=f"chat_info:{chat_id}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def remember_chat(chat_id: int) -> None:
@@ -298,6 +311,58 @@ async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
         if failed_chats:
             result += f" Недоступных чатов: {len(failed_chats)}."
         await callback.message.answer(result)
+
+
+@router.callback_query(F.data == "chat_info_menu")
+async def chat_info_menu_handler(callback: CallbackQuery) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    if not known_chats:
+        await callback.answer("Известных чатов пока нет.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "Выберите чат для просмотра доступной информации:",
+            reply_markup=chat_info_keyboard(),
+        )
+
+
+@router.callback_query(F.data.startswith("chat_info:"))
+async def chat_info_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    try:
+        chat_id = int(callback.data.split(":", 1)[1])
+    except (AttributeError, ValueError):
+        await callback.answer("Некорректный ID чата.", show_alert=True)
+        return
+    try:
+        chat = await bot.get_chat(chat_id)
+        member_count = await bot.get_chat_member_count(chat_id)
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not inspect chat %s: %s", chat_id, error)
+        await callback.answer("Не удалось получить информацию о чате.", show_alert=True)
+        return
+
+    username = f"@{chat.username}" if chat.username else "нет"
+    description = chat.description or "нет"
+    text = (
+        "Информация о чате\n\n"
+        f"Название: {chat.title or 'нет'}\n"
+        f"ID: {chat.id}\n"
+        f"Тип: {chat.type}\n"
+        f"Username: {username}\n"
+        f"Участников: {member_count}\n"
+        f"Описание: {description}\n\n"
+        "Telegram Bot API не передаёт список всех участников "
+        "их дату регистрации или дату вступления в чат."
+    )
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(text)
 
 
 @router.message(Command("chatid", "айди"))
