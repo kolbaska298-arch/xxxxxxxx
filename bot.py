@@ -202,7 +202,7 @@ async def punish_violation(bot: Bot, message: Message, reason: str) -> None:
     await mute_user(bot, message, 10, reason)
 
 
-@router.message(F.text.casefold() == "пометка")
+@router.message(Command("пометка"))
 async def mark_mute_handler(message: Message, bot: Bot) -> None:
     if not is_group(message) or message.from_user is None:
         return
