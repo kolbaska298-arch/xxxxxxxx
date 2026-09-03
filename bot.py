@@ -47,6 +47,7 @@ JOIN_LIMIT = 5
 JOIN_WINDOW = timedelta(seconds=60)
 RAID_RESTRICTION = timedelta(minutes=5)
 CAPTCHA_RESTRICTION = timedelta(minutes=5)
+EMERGENCY_RESTRICTION = timedelta(minutes=5)
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 CHAT_STORE = Path(os.getenv("CHAT_STORE", "known_chats.json"))
 
@@ -75,6 +76,8 @@ admin_kick_events: dict[tuple[int, int], deque[datetime]] = defaultdict(deque)
 join_events: dict[int, deque[tuple[datetime, int]]] = defaultdict(deque)
 raid_until: dict[int, datetime] = {}
 raid_alert_sent: dict[int, datetime] = {}
+emergency_until: dict[int, datetime] = {}
+emergency_tasks: dict[int, asyncio.Task] = {}
 pending_captcha: dict[tuple[int, int], datetime] = {}
 known_chats: set[int] = set()
 
@@ -92,17 +95,94 @@ WELCOME_MESSAGES = (
     "Приветствуем, {name}! Надеюсь, вы нашли здесь то, что искали, и останетесь надолго.",
 )
 
-RANDOM_REPLIES = (
-    "Я думал, что тебе написать, но забыл. Иди нахуй.",
-    "Хотел ответить умно, но передумал. Иди нахуй.",
-    "Сообщение принято. Саси бибу.",
-    "У меня на это был ответ, но он тоже ушел в мут.",
+RANDOM_REPLY_OPENERS = (
+    "Я прочитал это и решил, что", "Мой внутренний модератор сообщает, что",
+    "После совещания с самим собой выяснилось, что", "Срочная аналитика чата показывает, что",
+    "Не хочу прерывать этот поток мысли, но", "Телеграм уже пожалел, что доставил мне это, потому что",
+    "По данным сверхсекретной комиссии,", "Я бы ответил культурно, однако",
+    "Мозг бота сделал перерыв и постановил, что",
 )
+RANDOM_REPLY_MIDDLES = (
+    "это какой-то лютый", "сообщение выглядит как прекрасный", "в чате обнаружен подозрительный",
+    "тут происходит обычный", "это уверенный", "перед нами очередной",
+    "данный текст породил огромный", "это настолько странный", "зафиксирован максимально нелепый",
+    "в эфир ворвался легендарный",
+)
+RANDOM_REPLY_QUALIFIERS = (
+    "внезапный", "дежурный", "эпичный", "необъяснимый", "матерный",
+    "сомнительный", "грандиозный", "локальный", "безнадёжный", "вопиюще наглый",
+)
+RANDOM_REPLY_MIDDLES = tuple(
+    f"{middle} {qualifier}"
+    for middle in RANDOM_REPLY_MIDDLES
+    for qualifier in RANDOM_REPLY_QUALIFIERS
+)
+RANDOM_REPLY_ENDINGS = (
+    "бардак, но мне нравится", "капец", "цирк с конями", "пиздец", "суетной кошмар",
+    "маразм", "фейерверк ерунды", "разговорный провал", "хаос", "кринж",
+    "праздник дурных решений", "шумный бред", "эксперимент над здравым смыслом",
+    "компот из букв", "парад самоуверенности", "фокус без фокуса", "провал века",
+    "балаган", "бардак на максималках", "сюрприз для админов", "мут на ножках",
+    "приступ словесной жести", "пирожок с матом", "странный квест", "облом",
+    "запах приключений", "громкий пшик", "текстовый апокалипсис", "мелкий беспредел",
+    "вопль клавиатуры", "бытовой ад", "неудачный перформанс", "пыльный мем",
+    "самоуверенный треш", "драма из ничего", "случайный позор", "мыльная опера",
+    "шедевр бездарности", "разговорный кульбит", "бюджетный хаос", "крик души",
+    "странный поворот", "приключение без смысла", "разнос", "сбой матрицы",
+    "поток сознания", "веселый кошмар", "непредвиденный цирк", "провал логики",
+    "парадокс", "халтура", "непрошеный стендап", "взрыв тупняка", "нежданный трэш",
+    "сезонный бардак", "дешевый боевик", "каша", "бессмысленная драма", "мутная история",
+    "веский повод помолчать", "ржака", "глупость", "каприз", "позорный финал",
+    "сам себе анекдот", "жесткий оффтоп", "кривой спектакль", "комедия ошибок",
+    "плохая импровизация", "переоцененный шум", "словесная авария", "бесполезная сенсация",
+    "странная затея", "помойка аргументов", "неудачный заход", "рандомный угар",
+    "пыльный спор", "громкая ошибка", "мелкая пакость", "непонятный выкрутас",
+    "вялый скандал", "лишняя сущность", "чистый абсурд", "кривой фокус", "бредовый финт",
+    "микро-катастрофа", "смешной тупик", "сомнительный шедевр", "бардак", "шум", "хрень",
+    "ерунда", "полнейшая чушь", "матерный сюрприз", "финальный пиздец",
+)
+
+
+def random_reply() -> str:
+    return f"{random.choice(RANDOM_REPLY_OPENERS)} {random.choice(RANDOM_REPLY_MIDDLES)} {random.choice(RANDOM_REPLY_ENDINGS)}."
 
 SUSPICIOUS_LINK_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s]+|(?:t\.me|telegram\.me|telegram\.dog)/[A-Za-z0-9_+/?=-]+",
     re.IGNORECASE,
 )
+RAID_KEYWORD_PATTERN = re.compile(
+    r"\b(?:рейд|raid|массовый\s+вход|атака|боты|бот-атака|заспамили|налёт|налет)\b",
+    re.IGNORECASE,
+)
+RANDOM_LETTER_SPAM_PATTERN = re.compile(r"^[а-яёa-z]+$", re.IGNORECASE)
+NUMBER_SPAM_PATTERN = re.compile(r"^[0-9\s.,+\-]+$")
+
+
+def is_random_letter_spam(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text.casefold())
+    if len(normalized) < 12 or not RANDOM_LETTER_SPAM_PATTERN.fullmatch(normalized):
+        return False
+    return len(set(normalized)) <= max(4, len(normalized) // 5)
+
+
+def is_number_spam(text: str) -> bool:
+    tokens = re.findall(r"\d+", text)
+    normalized = "".join(tokens)
+    if len(normalized) < 11 or not NUMBER_SPAM_PATTERN.fullmatch(text):
+        return False
+    if len(tokens) >= 5:
+        values = [int(token) for token in tokens]
+        if all(values[index + 1] - values[index] in {-1, 1} for index in range(len(values) - 1)):
+            return True
+    if len(tokens) == 1:
+        return True
+    if len(set(normalized)) <= 3:
+        return True
+    digits = [int(digit) for digit in normalized]
+    return all(
+        digits[index + 1] - digits[index] in {-1, 1}
+        for index in range(len(digits) - 1)
+    )
 
 
 def is_group(message: Message) -> bool:
@@ -211,10 +291,76 @@ def full_chat_permissions() -> ChatPermissions:
     )
 
 
-def owner_update_keyboard() -> InlineKeyboardMarkup:
+async def extend_captcha_for_raid(bot: Bot, chat_id: int, raid_end: datetime) -> None:
+    captcha_end = raid_end + CAPTCHA_RESTRICTION
+    for (pending_chat_id, user_id), expires_at in list(pending_captcha.items()):
+        if pending_chat_id != chat_id:
+            continue
+        new_expiry = max(expires_at, captcha_end)
+        pending_captcha[(chat_id, user_id)] = new_expiry
+        try:
+            await bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=new_expiry,
+            )
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.warning("Could not extend captcha for member %s: %s", user_id, error)
+
+
+async def finish_emergency_lockdown(bot: Bot, chat_id: int, expected_until: datetime | None = None) -> None:
+    until = emergency_until.get(chat_id)
+    if until is None or (expected_until is not None and until != expected_until):
+        return
+    emergency_until.pop(chat_id, None)
+    emergency_tasks.pop(chat_id, None)
+    try:
+        await bot.set_chat_permissions(chat_id, full_chat_permissions())
+        await bot.send_message(chat_id, "Экстренный режим завершён. CAPTCHA у новых участников всё ещё обязательна.")
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not finish emergency lockdown in chat %s: %s", chat_id, error)
+
+
+async def release_emergency_lockdown(bot: Bot, chat_id: int, until: datetime) -> None:
+    delay = max(0, (until - utc_now()).total_seconds())
+    await asyncio.sleep(delay)
+    await finish_emergency_lockdown(bot, chat_id, until)
+
+
+async def activate_emergency_lockdown(bot: Bot) -> int:
+    now = utc_now()
+    until = now + EMERGENCY_RESTRICTION
+    activated = 0
+    for chat_id in sorted(known_chats):
+        try:
+            await bot.set_chat_permissions(
+                chat_id,
+                ChatPermissions(can_send_messages=False),
+            )
+            raid_until[chat_id] = max(raid_until.get(chat_id, now), until)
+            emergency_until[chat_id] = until
+            await extend_captcha_for_raid(bot, chat_id, until)
+            await bot.send_message(
+                chat_id,
+                "Включён экстренный режим Anti-graviti на 5 минут. Новые участники смогут пройти CAPTCHA после его завершения.",
+            )
+            old_task = emergency_tasks.get(chat_id)
+            if old_task:
+                old_task.cancel()
+            emergency_tasks[chat_id] = asyncio.create_task(release_emergency_lockdown(bot, chat_id, until))
+            activated += 1
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.warning("Could not activate emergency lockdown in chat %s: %s", chat_id, error)
+    return activated
+
+
+def owner_control_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
+            [InlineKeyboardButton(text="Включить экстренный режим", callback_data="emergency_on")],
+            [InlineKeyboardButton(text="Выключить экстренный режим", callback_data="emergency_off")],
         ]
     )
 
@@ -231,20 +377,22 @@ def remember_chat(chat_id: int) -> None:
 
 UPDATE_07_TEXT = (
     "Обновление Anti-graviti 0.7\n\n"
-    "- исправлен список мутов и CAPTCHA\n"
-    "- добавлена кнопка размуты\n"
-    "- добавлена CAPTCHA для новых участников\n"
-    "- усилена защита от ссылок и флуда\n"
-    "- добавлена защита от массового входа\n"
-    "- добавлена защита от массовых киков\n"
-    "- добавлены команды /help /chatid /send и /sendhere\n\n"
-    "by Anti-graviti"
+    "Что нового:\n"
+    "- исправлена работа списка мутов и CAPTCHA;\n"
+    "- добавлена кнопка снятия ограничения;\n"
+    "- для новых участников добавлена понятная CAPTCHA;\n"
+    "- усилена защита от ссылок, повторяющихся сообщений и флуда;\n"
+    "- добавлено обнаружение массового входа по ключевым словам;\n"
+    "- добавлена защита от массового входа и массовых киков;\n"
+    "- добавлен экстренный режим управления из личных сообщений владельца;\n"
+    "- добавлены команды /help, /chatid, /send и /sendhere.\n\n"
+    "Anti-graviti продолжает следить за порядком."
 )
 
 
 @router.message(Command("start"))
 async def start_handler(message: Message) -> None:
-    reply_markup = owner_update_keyboard() if message.from_user and message.from_user.id == OWNER_ID else None
+    reply_markup = owner_control_keyboard() if message.from_user and message.from_user.id == OWNER_ID else None
     await message.answer(
         "Anti-graviti активен. Используйте /help, чтобы посмотреть команды.",
         reply_markup=reply_markup,
@@ -253,17 +401,49 @@ async def start_handler(message: Message) -> None:
 
 @router.message(Command("help", "помощь"))
 async def help_handler(message: Message) -> None:
-    reply_markup = owner_update_keyboard() if message.from_user and message.from_user.id == OWNER_ID else None
+    reply_markup = owner_control_keyboard() if message.from_user and message.from_user.id == OWNER_ID else None
     await message.answer(
         "Anti-graviti\n\n"
         "/start - запустить бота\n"
         "/help - список команд\n"
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
+        "В личных сообщениях владельцу доступна команда /emergency для экстренной блокировки групп.\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
         "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA.",
         reply_markup=reply_markup,
     )
+
+
+@router.message(Command("emergency"))
+async def emergency_command_handler(message: Message, bot: Bot) -> None:
+    if message.chat.type != ChatType.PRIVATE or message.from_user is None or message.from_user.id != OWNER_ID:
+        return
+    await message.answer(
+        "Экстренное управление группами:",
+        reply_markup=owner_control_keyboard(),
+    )
+
+
+@router.callback_query(F.data.in_({"emergency_on", "emergency_off"}))
+async def emergency_callback_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    if callback.data == "emergency_on":
+        count = await activate_emergency_lockdown(bot)
+        await callback.answer("Экстренный режим включён.")
+        if callback.message:
+            await callback.message.answer(f"Экстренный режим включён в доступных чатах: {count}.")
+        return
+    now = utc_now()
+    for chat_id, until in list(emergency_until.items()):
+        emergency_until[chat_id] = now
+        task = emergency_tasks.get(chat_id)
+        if task:
+            task.cancel()
+        await finish_emergency_lockdown(bot, chat_id, now)
+    await callback.answer("Экстренный режим выключен.")
 
 
 @router.callback_query(F.data == "show_update_07")
@@ -365,17 +545,26 @@ async def welcome_new_member(event: ChatMemberUpdated, bot: Bot) -> None:
     raid_active = raid_until.get(event.chat.id, datetime.min.replace(tzinfo=timezone.utc)) > now
 
     if event.new_chat_member.status == ChatMemberStatus.MEMBER:
-        pending_captcha[(event.chat.id, event.new_chat_member.user.id)] = now + CAPTCHA_RESTRICTION
+        raid_end = raid_until.get(event.chat.id, now)
+        captcha_expiry = max(now + CAPTCHA_RESTRICTION, raid_end + CAPTCHA_RESTRICTION if raid_active else now)
+        pending_captcha[(event.chat.id, event.new_chat_member.user.id)] = captcha_expiry
         try:
             await bot.restrict_chat_member(
                 chat_id=event.chat.id,
                 user_id=event.new_chat_member.user.id,
                 permissions=ChatPermissions(can_send_messages=False),
-                until_date=pending_captcha[(event.chat.id, event.new_chat_member.user.id)],
+                until_date=captcha_expiry,
             )
             await bot.send_message(
                 event.chat.id,
-                f"{name}, подтвердите, что вы человек, нажав кнопку ниже. Проверка действует 5 минут.",
+                (
+                    f"{name}, вы вошли в группу во время режима защиты. Сейчас писать нельзя. "
+                    "После его завершения нажмите кнопку «Я не бот» ниже, чтобы пройти CAPTCHA. "
+                    "Проверка действует ещё 5 минут."
+                    if raid_active
+                    else f"{name}, подтвердите, что вы человек, нажав кнопку «Я не бот» ниже. "
+                    "До прохождения CAPTCHA отправка сообщений ограничена. Проверка действует 5 минут."
+                ),
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[[
                         InlineKeyboardButton(
@@ -440,6 +629,10 @@ async def captcha_handler(callback: CallbackQuery, bot: Bot) -> None:
 
     if callback.from_user.id != user_id:
         await callback.answer("Эта кнопка предназначена для другого участника.", show_alert=True)
+        return
+    raid_end = raid_until.get(chat_id, datetime.min.replace(tzinfo=timezone.utc))
+    if raid_end > utc_now():
+        await callback.answer("Режим защиты ещё активен. Попробуйте после его завершения.", show_alert=True)
         return
     expires_at = pending_captcha.get((chat_id, user_id))
     if expires_at is None or expires_at <= utc_now():
@@ -673,6 +866,26 @@ async def content_handler(message: Message, bot: Bot) -> None:
     now = utc_now()
     key = (message.chat.id, message.from_user.id)
 
+    if message.text and RAID_KEYWORD_PATTERN.search(message.text):
+        raid_end = now + RAID_RESTRICTION
+        already_active = raid_until.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc)) > now
+        raid_until[message.chat.id] = max(raid_until.get(message.chat.id, now), raid_end)
+        await extend_captcha_for_raid(bot, message.chat.id, raid_until[message.chat.id])
+        if not already_active:
+            raid_alert_sent[message.chat.id] = now
+            alert = "Anti-graviti: обнаружен тревожный признак рейда. Новые участники временно ограничены."
+            await message.answer(alert)
+            if OWNER_ID:
+                await bot.send_message(OWNER_ID, f"Группа: {message.chat.title or message.chat.id}\n{alert}")
+
+    if message.text and is_random_letter_spam(message.text):
+        await mute_user(bot, message, 2, "отправлял бессмысленный спам из случайных букв")
+        return
+
+    if message.text and is_number_spam(message.text):
+        await mute_user(bot, message, 2, "отправлял числовой спам")
+        return
+
     message_rate = message_events[key]
     while message_rate and now - message_rate[0] > MESSAGE_WINDOW:
         message_rate.popleft()
@@ -702,7 +915,7 @@ async def content_handler(message: Message, bot: Bot) -> None:
             return
 
     if message.text and random.random() < RANDOM_REPLY_PROBABILITY:
-        await message.reply(random.choice(RANDOM_REPLIES))
+        await message.reply(random_reply())
 
     if message.poll is not None and message.poll.type == "quiz":
         sticker_events.pop(key, None)
