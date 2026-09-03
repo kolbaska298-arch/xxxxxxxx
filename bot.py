@@ -40,7 +40,7 @@ MESSAGE_LIMIT = 8
 MESSAGE_WINDOW = timedelta(seconds=10)
 MEDIA_MESSAGE_LIMIT = 4
 MEDIA_MESSAGE_WINDOW = timedelta(seconds=20)
-RANDOM_REPLY_PROBABILITY = 0.01
+RANDOM_REPLY_PROBABILITY = 0.10
 KICK_LIMIT = 3
 KICK_WINDOW = timedelta(seconds=30)
 JOIN_LIMIT = 5
@@ -80,6 +80,7 @@ emergency_until: dict[int, datetime] = {}
 emergency_tasks: dict[int, asyncio.Task] = {}
 pending_captcha: dict[tuple[int, int], datetime] = {}
 known_chats: set[int] = set()
+pending_owner_message_chat: dict[int, int] = {}
 
 try:
     known_chats.update(int(chat_id) for chat_id in json.loads(CHAT_STORE.read_text(encoding="utf-8")))
@@ -358,6 +359,7 @@ async def activate_emergency_lockdown(bot: Bot) -> int:
 def owner_control_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="Выбрать чат для сообщения", callback_data="choose_message_chat")],
             [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
             [InlineKeyboardButton(text="Включить экстренный режим", callback_data="emergency_on")],
             [InlineKeyboardButton(text="Выключить экстренный режим", callback_data="emergency_off")],
@@ -375,8 +377,8 @@ def remember_chat(chat_id: int) -> None:
         logger.warning("Could not save known chat %s: %s", chat_id, error)
 
 
-UPDATE_07_TEXT = (
-    "Обновление Anti-graviti 0.7\n\n"
+UPDATE_TEXT = (
+    "Обновление Anti-graviti\n\n"
     "Что нового:\n"
     "- исправлена работа списка мутов и CAPTCHA;\n"
     "- добавлена кнопка снятия ограничения;\n"
@@ -385,7 +387,7 @@ UPDATE_07_TEXT = (
     "- добавлено обнаружение массового входа по ключевым словам;\n"
     "- добавлена защита от массового входа и массовых киков;\n"
     "- добавлен экстренный режим управления из личных сообщений владельца;\n"
-    "- добавлены команды /help, /chatid, /send и /sendhere.\n\n"
+    "- бот теперь может случайно отвечать на обычные сообщения;\n"
     "Anti-graviti продолжает следить за порядком."
 )
 
@@ -408,7 +410,7 @@ async def help_handler(message: Message) -> None:
         "/help - список команд\n"
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
-        "В личных сообщениях владельцу доступна команда /emergency для экстренной блокировки групп.\n\n"
+        "В личных сообщениях владельцу доступны кнопки экстренного режима и отправки сообщения в выбранную группу.\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
         "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA.",
         reply_markup=reply_markup,
@@ -423,6 +425,71 @@ async def emergency_command_handler(message: Message, bot: Bot) -> None:
         "Экстренное управление группами:",
         reply_markup=owner_control_keyboard(),
     )
+
+
+@router.callback_query(F.data == "choose_message_chat")
+async def choose_message_chat_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    if not known_chats:
+        await callback.answer("Пока нет известных групп.", show_alert=True)
+        return
+
+    buttons = []
+    for chat_id in sorted(known_chats):
+        try:
+            chat = await bot.get_chat(chat_id)
+            title = chat.title or str(chat_id)
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.warning("Could not load chat %s for owner menu: %s", chat_id, error)
+            title = f"Недоступный чат {chat_id}"
+        buttons.append([
+            InlineKeyboardButton(text=f"{title} ({chat_id})", callback_data=f"message_chat:{chat_id}")
+        ])
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "Выберите чат. После этого отправьте следующим сообщением текст для публикации:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+
+
+@router.callback_query(F.data.startswith("message_chat:"))
+async def select_message_chat_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    try:
+        chat_id = int(callback.data.split(":", 1)[1])
+    except (AttributeError, ValueError):
+        await callback.answer("Некорректный чат.", show_alert=True)
+        return
+    if chat_id not in known_chats:
+        await callback.answer("Этот чат больше не найден.", show_alert=True)
+        return
+    pending_owner_message_chat[callback.from_user.id] = chat_id
+    try:
+        chat = await bot.get_chat(chat_id)
+        title = chat.title or str(chat_id)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        title = str(chat_id)
+    await callback.answer("Чат выбран.")
+    if callback.message:
+        await callback.message.answer(f"Чат выбран: {title} ({chat_id}). Теперь отправьте текст одним сообщением.")
+
+
+@router.message(F.chat.type == ChatType.PRIVATE, F.from_user.id == OWNER_ID, F.text, ~F.text.startswith("/"))
+async def owner_message_handler(message: Message, bot: Bot) -> None:
+    chat_id = pending_owner_message_chat.pop(message.from_user.id, None)
+    if chat_id is None:
+        return
+    try:
+        await bot.send_message(chat_id, message.text)
+        await message.answer("Сообщение отправлено в выбранный чат.", reply_markup=owner_control_keyboard())
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not send owner message to %s: %s", chat_id, error)
+        await message.answer("Не удалось отправить сообщение в выбранный чат.", reply_markup=owner_control_keyboard())
 
 
 @router.callback_query(F.data.in_({"emergency_on", "emergency_off"}))
@@ -453,7 +520,7 @@ async def update_07_handler(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     if callback.message:
-        await callback.message.answer(UPDATE_07_TEXT)
+        await callback.message.answer(UPDATE_TEXT)
 
 
 @router.callback_query(F.data == "publish_update_07")
@@ -467,7 +534,7 @@ async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
     failed_chats = []
     for chat_id in sorted(known_chats):
         try:
-            await bot.send_message(chat_id, UPDATE_07_TEXT)
+            await bot.send_message(chat_id, UPDATE_TEXT)
             sent_count += 1
         except (TelegramBadRequest, TelegramForbiddenError) as error:
             failed_chats.append(chat_id)
@@ -484,41 +551,6 @@ async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
 async def chat_id_handler(message: Message) -> None:
     if is_group(message) and message.from_user and message.from_user.id == OWNER_ID:
         await message.answer(f"ID этого чата: {message.chat.id}")
-
-
-@router.message(Command("send"))
-async def send_command_handler(message: Message, bot: Bot) -> None:
-    if message.from_user is None or message.from_user.id != OWNER_ID:
-        return
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("Формат: /send chat_id текст")
-        return
-    try:
-        chat_id = int(parts[1])
-    except ValueError:
-        await message.answer("chat_id должен быть числом.")
-        return
-    try:
-        await bot.send_message(chat_id, parts[2])
-        await message.answer("Сообщение отправлено.")
-    except (TelegramBadRequest, TelegramForbiddenError) as error:
-        logger.warning("Could not send owner message to %s: %s", chat_id, error)
-        await message.answer("Не удалось отправить сообщение. Проверьте ID и права бота.")
-
-
-@router.message(Command("sendhere"))
-async def send_here_command_handler(message: Message, bot: Bot) -> None:
-    if not is_group(message) or message.from_user is None or message.from_user.id != OWNER_ID:
-        return
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("Формат: /sendhere текст")
-        return
-    try:
-        await bot.send_message(message.chat.id, parts[1])
-    except (TelegramBadRequest, TelegramForbiddenError) as error:
-        logger.warning("Could not send owner message to %s: %s", message.chat.id, error)
 
 
 @router.chat_member()
