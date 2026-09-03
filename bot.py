@@ -40,7 +40,8 @@ MESSAGE_LIMIT = 8
 MESSAGE_WINDOW = timedelta(seconds=10)
 MEDIA_MESSAGE_LIMIT = 4
 MEDIA_MESSAGE_WINDOW = timedelta(seconds=20)
-RANDOM_REPLY_PROBABILITY = 0.06
+RANDOM_REPLY_PROBABILITY = 0.04
+RANDOM_REPLY_COOLDOWN = timedelta(minutes=2)
 KICK_LIMIT = 3
 KICK_WINDOW = timedelta(seconds=30)
 JOIN_LIMIT = 5
@@ -81,6 +82,7 @@ emergency_tasks: dict[int, asyncio.Task] = {}
 pending_captcha: dict[tuple[int, int], datetime] = {}
 known_chats: set[int] = set()
 pending_owner_message_chat: dict[int, int] = {}
+random_reply_until: dict[int, datetime] = {}
 
 try:
     known_chats.update(int(chat_id) for chat_id in json.loads(CHAT_STORE.read_text(encoding="utf-8")))
@@ -945,8 +947,10 @@ async def content_handler(message: Message, bot: Bot) -> None:
             await mute_user(bot, message, 5, "повторял одно и то же сообщение")
             return
 
-    if message.text and random.random() < RANDOM_REPLY_PROBABILITY:
+    reply_allowed_at = random_reply_until.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc))
+    if message.text and now >= reply_allowed_at and random.random() < RANDOM_REPLY_PROBABILITY:
         await message.reply(random_reply())
+        random_reply_until[message.chat.id] = now + RANDOM_REPLY_COOLDOWN
 
     if message.poll is not None and message.poll.type == "quiz":
         sticker_events.pop(key, None)
