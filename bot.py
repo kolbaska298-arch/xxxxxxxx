@@ -40,7 +40,7 @@ MESSAGE_LIMIT = 8
 MESSAGE_WINDOW = timedelta(seconds=10)
 MEDIA_MESSAGE_LIMIT = 4
 MEDIA_MESSAGE_WINDOW = timedelta(seconds=20)
-RANDOM_REPLY_PROBABILITY = 0.10
+RANDOM_REPLY_PROBABILITY = 0.80
 KICK_LIMIT = 3
 KICK_WINDOW = timedelta(seconds=30)
 JOIN_LIMIT = 5
@@ -883,10 +883,9 @@ async def terminal_sender(bot: Bot) -> None:
             print("Не удалось отправить сообщение: проверьте chat_id и права бота.")
 
 
-@router.message(F.text)
+@router.message(F.text.casefold() == "бот хуесос")
 async def bot_insult_handler(message: Message) -> None:
-    if message.text.strip().casefold() == "бот хуесос":
-        await message.answer("да мой господин я тут")
+    await message.answer("да мой господин я тут")
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
