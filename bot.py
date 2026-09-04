@@ -40,8 +40,8 @@ MESSAGE_LIMIT = 8
 MESSAGE_WINDOW = timedelta(seconds=10)
 MEDIA_MESSAGE_LIMIT = 4
 MEDIA_MESSAGE_WINDOW = timedelta(seconds=20)
-RANDOM_REPLY_PROBABILITY = 0.04
-RANDOM_REPLY_COOLDOWN = timedelta(minutes=2)
+RANDOM_REPLY_PROBABILITY = 0.02
+RANDOM_REPLY_COOLDOWN = timedelta(minutes=4)
 KICK_LIMIT = 3
 KICK_WINDOW = timedelta(seconds=30)
 JOIN_LIMIT = 5
@@ -83,6 +83,7 @@ pending_captcha: dict[tuple[int, int], datetime] = {}
 known_chats: set[int] = set()
 pending_owner_message_chat: dict[int, int] = {}
 random_reply_until: dict[int, datetime] = {}
+warning_counts: dict[tuple[int, int], int] = defaultdict(int)
 
 try:
     known_chats.update(int(chat_id) for chat_id in json.loads(CHAT_STORE.read_text(encoding="utf-8")))
@@ -144,10 +145,48 @@ RANDOM_REPLY_ENDINGS = (
     "микро-катастрофа", "смешной тупик", "сомнительный шедевр", "бардак", "шум", "хрень",
     "ерунда", "полнейшая чушь", "матерный сюрприз", "финальный пиздец",
 )
+RANDOM_REPLY_PROFANITY = (
+    "блядь", "нахуй", "ебать", "пиздец", "хуйня", "ебаный", "охуеть",
+    "сука", "долбоёбский", "заебало", "выбесило нахуй", "чертовски ебаный",
+    "какого хуя", "ну и хуй с ним", "пиздец как смешно", "ебать-копать",
+    "матерный капец", "нахреновый треш", "охуенный бардак", "сраный цирк",
+)
+DIRECT_RANDOM_REPLIES = (
+    "Ты хуесос, конечно, но продолжай.", "Саси и не отвлекай чат, хуесос.",
+    "Я сосал? Это ты тут сосёшь, не переводи стрелки.", "Ты чего, ебанат, пиши нормально.",
+    "Хуету написал, сам понял хоть что-нибудь?", "Иди нахуй со своим шедевром.",
+    "Слов так много, а смысла хуй.", "Ты сейчас серьёзно эту хуйню отправил?",
+    "Мозг подключи, долбоёб.", "Саси бибу и не мешай разговору.",
+    "Это был текст или приступ пиздеца?", "Хуйню неси потише.",
+    "Твой внутренний гений снова обосрался.", "Пиши нормально, ебаный мастер хаоса.",
+    "Какой охуенный бред, аж страшно.", "Ты сам-то понял, что высрал?",
+    "Не благодари, я уже всё сказал нахуй.", "Смысл сообщения сбежал и не вернулся.",
+    "Ебать, ну и подача, держи себя в руках.", "Твой текст просит пощады, сука.",
+    "Хороший заход, жаль, что сразу в пизду.", "Ты не флуди, хуесос.",
+    "Сейчас бы такую хуйню писать с серьёзным лицом.", "Иди подумай и возвращайся без бреда.",
+    "В этом сообщении больше мата, чем смысла, нахуй.", "Пиздец, клавиатура сама за тебя страдает.",
+    "Не текст, а сраный фейерверк тупняка.", "Ты чемпион по бессмысленной хуйне.",
+    "Хватит ебать чат своим потоком сознания.", "Слова есть, мозга не завезли.",
+    "Охуеть, как уверенно написана полная хуйня.", "Тише, ебаный генератор шума.",
+    "Тебя читать без мата невозможно, сука.", "Саси и не спорь с очевидным.",
+    "Вот это поворот: опять хуесос написал.", "Иди нахуй, но возвращайся с нормальным текстом.",
+    "Ты хотел сказать мысль, а получилось пиздец что.", "Блядь, даже бот устал это разбирать.",
+    "Хуета обнаружена, смысл не найден.", "Пиши по-человечески, ебаный оратор.",
+    "Ты так стараешься, а выходит один пиздец.", "Срочно выдайте этому сообщению мут.",
+    "Хуесос detected: смысл отсутствует.", "Не позорь клавиатуру, долбоёб.",
+    "Как же ты красиво несёшь хуйню.", "Пять букв: иди нахуй.",
+    "Меньше понтов, больше смысла, ебать.", "Твой текст сегодня особенно сраный.",
+    "Саси, пока чат ещё держится.", "Ты не пишешь, ты создаёшь словесный пиздец.",
+    "Бред принят, отправлен в отдел нахуй.", "С таким текстом только в мут, сука.",
+)
 
 
 def random_reply() -> str:
-    return f"{random.choice(RANDOM_REPLY_OPENERS)} {random.choice(RANDOM_REPLY_MIDDLES)} {random.choice(RANDOM_REPLY_ENDINGS)}."
+    if random.random() < 0.65:
+        return random.choice(DIRECT_RANDOM_REPLIES)
+    profanity = random.choice(RANDOM_REPLY_PROFANITY)
+    ending = random.choice(RANDOM_REPLY_ENDINGS)
+    return f"{random.choice(RANDOM_REPLY_OPENERS)} {random.choice(RANDOM_REPLY_MIDDLES)} {ending}, {profanity}."
 
 SUSPICIOUS_LINK_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s]+|(?:t\.me|telegram\.me|telegram\.dog)/[A-Za-z0-9_+/?=-]+",
@@ -390,6 +429,8 @@ UPDATE_TEXT = (
     "- добавлена защита от массового входа и массовых киков;\n"
     "- добавлен экстренный режим управления из личных сообщений владельца;\n"
     "- бот теперь может случайно отвечать на обычные сообщения;\n"
+    "- добавлены предупреждения: пятое предупреждение блокирует пользователя;\n"
+    "- ссылки от пользователей с предупреждениями автоматически удаляются;\n"
     "Anti-graviti продолжает следить за порядком."
 )
 
@@ -412,6 +453,7 @@ async def help_handler(message: Message) -> None:
         "/help - список команд\n"
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
+        "Администратор может ответить командами /warn, /warnings или /unwarn на сообщение участника. После пяти предупреждений участник блокируется.\n\n"
         "В личных сообщениях владельцу доступны кнопки экстренного режима и отправки сообщения в выбранную группу.\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
         "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA.",
@@ -553,6 +595,72 @@ async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
 async def chat_id_handler(message: Message) -> None:
     if is_group(message) and message.from_user and message.from_user.id == OWNER_ID:
         await message.answer(f"ID этого чата: {message.chat.id}")
+
+
+@router.message(Command("warn"))
+async def warn_handler(message: Message, bot: Bot) -> None:
+    if not is_group(message) or message.reply_to_message is None:
+        return
+    if not await is_moderator_or_creator(bot, message):
+        return
+    target = message.reply_to_message.from_user
+    if target is None or target.id == bot.id:
+        return
+    target_member = await bot.get_chat_member(message.chat.id, target.id)
+    if target_member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+        await message.answer("Нельзя выдать предупреждение администратору.")
+        return
+
+    key = (message.chat.id, target.id)
+    warning_counts[key] += 1
+    count = warning_counts[key]
+    if count >= 5:
+        try:
+            await bot.ban_chat_member(message.chat.id, target.id)
+            warning_counts.pop(key, None)
+            await message.answer(f"{target.full_name} получил пятое предупреждение и заблокирован.")
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.warning("Could not ban warned user %s: %s", target.id, error)
+            await message.answer("Не удалось заблокировать пользователя: проверьте права бота.")
+        return
+    await message.answer(
+        f"Предупреждение для {target.full_name}: {count}/5. "
+        "Ссылки от этого пользователя будут удаляться."
+    )
+
+
+@router.message(Command("warnings", "предупреждения"))
+async def warnings_handler(message: Message, bot: Bot) -> None:
+    if not is_group(message) or message.reply_to_message is None:
+        return
+    if not await is_moderator_or_creator(bot, message):
+        return
+    target = message.reply_to_message.from_user
+    if target is None:
+        return
+    count = warning_counts.get((message.chat.id, target.id), 0)
+    await message.answer(f"У {target.full_name} предупреждений: {count}/5.")
+
+
+@router.message(Command("unwarn", "снятьпред"))
+async def unwarn_handler(message: Message, bot: Bot) -> None:
+    if not is_group(message) or message.reply_to_message is None:
+        return
+    if not await is_moderator_or_creator(bot, message):
+        return
+    target = message.reply_to_message.from_user
+    if target is None:
+        return
+    key = (message.chat.id, target.id)
+    count = warning_counts.get(key, 0)
+    if count == 0:
+        await message.answer(f"У {target.full_name} нет предупреждений.")
+        return
+    if count == 1:
+        warning_counts.pop(key, None)
+    else:
+        warning_counts[key] = count - 1
+    await message.answer(f"Одно предупреждение снято с {target.full_name}: {count - 1}/5.")
 
 
 @router.chat_member()
@@ -928,7 +1036,19 @@ async def content_handler(message: Message, bot: Bot) -> None:
         await mute_user(bot, message, 2, "слишком часто отправлял сообщения")
         return
 
-    if message.text and SUSPICIOUS_LINK_PATTERN.search(message.text):
+    has_link = bool(message.text and SUSPICIOUS_LINK_PATTERN.search(message.text))
+    if has_link and warning_counts.get(key, 0) > 0:
+        try:
+            await bot.delete_message(message.chat.id, message.message_id)
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.info("Could not delete warned user's link message %s: %s", message.message_id, error)
+        await message.answer(
+            f"{display_name(message)}, ссылки запрещены после предупреждения. "
+            f"Предупреждений: {warning_counts[key]}/5."
+        )
+        return
+
+    if has_link:
         try:
             await bot.delete_message(message.chat.id, message.message_id)
         except (TelegramBadRequest, TelegramForbiddenError) as error:
