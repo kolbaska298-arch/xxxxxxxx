@@ -83,6 +83,7 @@ pending_captcha: dict[tuple[int, int], datetime] = {}
 known_chats: set[int] = set()
 pending_owner_message_chat: dict[int, int] = {}
 random_reply_until: dict[int, datetime] = {}
+last_random_reply: dict[int, str] = {}
 warning_counts: dict[tuple[int, int], int] = defaultdict(int)
 
 try:
@@ -181,12 +182,22 @@ DIRECT_RANDOM_REPLIES = (
 )
 
 
-def random_reply() -> str:
+def random_reply(chat_id: int) -> str:
     if random.random() < 0.65:
-        return random.choice(DIRECT_RANDOM_REPLIES)
-    profanity = random.choice(RANDOM_REPLY_PROFANITY)
-    ending = random.choice(RANDOM_REPLY_ENDINGS)
-    return f"{random.choice(RANDOM_REPLY_OPENERS)} {random.choice(RANDOM_REPLY_MIDDLES)} {ending}, {profanity}."
+        replies = DIRECT_RANDOM_REPLIES
+        reply = random.choice(replies)
+    else:
+        profanity = random.choice(RANDOM_REPLY_PROFANITY)
+        ending = random.choice(RANDOM_REPLY_ENDINGS)
+        reply = f"{random.choice(RANDOM_REPLY_OPENERS)} {random.choice(RANDOM_REPLY_MIDDLES)} {ending}, {profanity}."
+
+    previous = last_random_reply.get(chat_id)
+    if reply == previous:
+        alternatives = [candidate for candidate in DIRECT_RANDOM_REPLIES if candidate != previous]
+        if alternatives:
+            reply = random.choice(alternatives)
+    last_random_reply[chat_id] = reply
+    return reply
 
 SUSPICIOUS_LINK_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s]+|(?:t\.me|telegram\.me|telegram\.dog)/[A-Za-z0-9_+/?=-]+",
@@ -196,37 +207,6 @@ RAID_KEYWORD_PATTERN = re.compile(
     r"\b(?:рейд|raid|массовый\s+вход|атака|боты|бот-атака|заспамили|налёт|налет)\b",
     re.IGNORECASE,
 )
-RANDOM_LETTER_SPAM_PATTERN = re.compile(r"^[а-яёa-z]+$", re.IGNORECASE)
-NUMBER_SPAM_PATTERN = re.compile(r"^[0-9\s.,+\-]+$")
-
-
-def is_random_letter_spam(text: str) -> bool:
-    normalized = re.sub(r"\s+", "", text.casefold())
-    if len(normalized) < 12 or not RANDOM_LETTER_SPAM_PATTERN.fullmatch(normalized):
-        return False
-    return len(set(normalized)) <= max(4, len(normalized) // 5)
-
-
-def is_number_spam(text: str) -> bool:
-    tokens = re.findall(r"\d+", text)
-    normalized = "".join(tokens)
-    if len(normalized) < 11 or not NUMBER_SPAM_PATTERN.fullmatch(text):
-        return False
-    if len(tokens) >= 5:
-        values = [int(token) for token in tokens]
-        if all(values[index + 1] - values[index] in {-1, 1} for index in range(len(values) - 1)):
-            return True
-    if len(tokens) == 1:
-        return True
-    if len(set(normalized)) <= 3:
-        return True
-    digits = [int(digit) for digit in normalized]
-    return all(
-        digits[index + 1] - digits[index] in {-1, 1}
-        for index in range(len(digits) - 1)
-    )
-
-
 def is_group(message: Message) -> bool:
     return message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
 
@@ -402,6 +382,7 @@ def owner_control_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Выбрать чат для сообщения", callback_data="choose_message_chat")],
             [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
+            [InlineKeyboardButton(text="Выложить патч", callback_data="publish_patch_08")],
             [InlineKeyboardButton(text="Включить экстренный режим", callback_data="emergency_on")],
             [InlineKeyboardButton(text="Выключить экстренный режим", callback_data="emergency_off")],
         ]
@@ -432,6 +413,16 @@ UPDATE_TEXT = (
     "- добавлены предупреждения: пятое предупреждение блокирует пользователя;\n"
     "- ссылки от пользователей с предупреждениями автоматически удаляются;\n"
     "Anti-graviti продолжает следить за порядком."
+)
+
+PATCH_TEXT = (
+    "Патч Anti-graviti\n\n"
+    "Исправлено:\n"
+    "- убраны ложные муты за якобы случайные буквы и числовой спам;\n"
+    "- сохранена защита от настоящего частого флуда и одинаковых сообщений;\n"
+    "- случайные ответы бота больше не повторяются подряд в одной группе;\n"
+    "- добавлены разные ответы на фразу «бот хуесос».\n\n"
+    "Патч применён."
 )
 
 
@@ -489,7 +480,10 @@ async def choose_message_chat_handler(callback: CallbackQuery, bot: Bot) -> None
             logger.warning("Could not load chat %s for owner menu: %s", chat_id, error)
             title = f"Недоступный чат {chat_id}"
         buttons.append([
-            InlineKeyboardButton(text=f"{title} ({chat_id})", callback_data=f"message_chat:{chat_id}")
+            InlineKeyboardButton(
+                text=f"{title} ({chat_id})",
+                callback_data=f"message_chat:{chat_id}",
+            )
         ])
     await callback.answer()
     if callback.message:
@@ -591,6 +585,30 @@ async def publish_update_07_handler(callback: CallbackQuery, bot: Bot) -> None:
         await callback.message.answer(result)
 
 
+@router.callback_query(F.data == "publish_patch_08")
+async def publish_patch_08_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+
+    await callback.answer("Начинаю публикацию патча.")
+    sent_count = 0
+    failed_chats = []
+    for chat_id in sorted(known_chats):
+        try:
+            await bot.send_message(chat_id, PATCH_TEXT)
+            sent_count += 1
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            failed_chats.append(chat_id)
+            logger.warning("Could not publish patch to %s: %s", chat_id, error)
+
+    if callback.message:
+        result = f"Патч опубликован в чатах: {sent_count}."
+        if failed_chats:
+            result += f" Недоступных чатов: {len(failed_chats)}."
+        await callback.message.answer(result)
+
+
 @router.message(Command("chatid", "айди"))
 async def chat_id_handler(message: Message) -> None:
     if is_group(message) and message.from_user and message.from_user.id == OWNER_ID:
@@ -676,7 +694,6 @@ async def welcome_new_member(event: ChatMemberUpdated, bot: Bot) -> None:
     }:
         return
     remember_chat(event.chat.id)
-
     name = member_display_name(event)
     now = utc_now()
     joins = join_events[event.chat.id]
@@ -993,9 +1010,18 @@ async def terminal_sender(bot: Bot) -> None:
             print("Не удалось отправить сообщение: проверьте chat_id и права бота.")
 
 
+INSULT_REPLIES = (
+    "да мой господин, я тут",
+    "на связи. Но аргументы можно было выбрать получше.",
+    "услышал. Теперь попробуй написать что-нибудь полезное.",
+    "я тут, а вот смысл сообщения где-то потерялся.",
+    "принято к сведению. Работаю дальше.",
+)
+
+
 @router.message(F.text.casefold() == "бот хуесос")
 async def bot_insult_handler(message: Message) -> None:
-    await message.answer("да мой господин я тут")
+    await message.answer(random.choice(INSULT_REPLIES))
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
@@ -1018,14 +1044,6 @@ async def content_handler(message: Message, bot: Bot) -> None:
             await message.answer(alert)
             if OWNER_ID:
                 await bot.send_message(OWNER_ID, f"Группа: {message.chat.title or message.chat.id}\n{alert}")
-
-    if message.text and is_random_letter_spam(message.text):
-        await mute_user(bot, message, 2, "отправлял бессмысленный спам из случайных букв")
-        return
-
-    if message.text and is_number_spam(message.text):
-        await mute_user(bot, message, 2, "отправлял числовой спам")
-        return
 
     message_rate = message_events[key]
     while message_rate and now - message_rate[0] > MESSAGE_WINDOW:
@@ -1069,7 +1087,7 @@ async def content_handler(message: Message, bot: Bot) -> None:
 
     reply_allowed_at = random_reply_until.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc))
     if message.text and now >= reply_allowed_at and random.random() < RANDOM_REPLY_PROBABILITY:
-        await message.reply(random_reply())
+        await message.reply(random_reply(message.chat.id))
         random_reply_until[message.chat.id] = now + RANDOM_REPLY_COOLDOWN
 
     if message.poll is not None and message.poll.type == "quiz":
