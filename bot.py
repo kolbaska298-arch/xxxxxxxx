@@ -381,6 +381,7 @@ def owner_control_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Выбрать чат для сообщения", callback_data="choose_message_chat")],
+            [InlineKeyboardButton(text="Получить ссылку на чат", callback_data="choose_invite_chat")],
             [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
             [InlineKeyboardButton(text="Выложить патч", callback_data="publish_patch_08")],
             [InlineKeyboardButton(text="Включить экстренный режим", callback_data="emergency_on")],
@@ -445,7 +446,8 @@ async def help_handler(message: Message) -> None:
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
         "Администратор может ответить командами /warn, /warnings или /unwarn на сообщение участника. После пяти предупреждений участник блокируется.\n\n"
-        "В личных сообщениях владельцу доступны кнопки экстренного режима и отправки сообщения в выбранную группу.\n\n"
+        "В личных сообщениях владельцу доступны кнопки экстренного режима, отправки сообщения и получения ссылки на выбранную группу.\n"
+        "Для списка ссылок используйте /ссылка или /link.\n\n"
         "Автоматически: приветствует новых участников, защищает от флуда "
         "стикерами, медиа и массовыми киками. Новым участникам нужно пройти CAPTCHA.",
         reply_markup=reply_markup,
@@ -460,6 +462,74 @@ async def emergency_command_handler(message: Message, bot: Bot) -> None:
         "Экстренное управление группами:",
         reply_markup=owner_control_keyboard(),
     )
+
+
+@router.message(Command("ссылка", "link"))
+async def invite_link_command_handler(message: Message) -> None:
+    if message.chat.type != ChatType.PRIVATE or message.from_user is None or message.from_user.id != OWNER_ID:
+        return
+    await message.answer(
+        "Выберите чат, для которого создать ссылку:",
+        reply_markup=invite_chat_keyboard(),
+    )
+
+
+def invite_chat_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Чат {chat_id}",
+                    callback_data=f"invite_chat:{chat_id}",
+                )
+            ]
+            for chat_id in sorted(known_chats)
+        ]
+    )
+
+
+@router.callback_query(F.data == "choose_invite_chat")
+async def choose_invite_chat_handler(callback: CallbackQuery) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    if not known_chats:
+        await callback.answer("Пока нет известных групп.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "Выберите чат, для которого создать ссылку:",
+            reply_markup=invite_chat_keyboard(),
+        )
+
+
+@router.callback_query(F.data.startswith("invite_chat:"))
+async def invite_link_handler(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or callback.from_user.id != OWNER_ID:
+        await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
+        return
+    try:
+        chat_id = int(callback.data.split(":", 1)[1])
+    except (AttributeError, ValueError):
+        await callback.answer("Некорректный чат.", show_alert=True)
+        return
+    if chat_id not in known_chats:
+        await callback.answer("Этот чат больше не найден.", show_alert=True)
+        return
+
+    try:
+        chat = await bot.get_chat(chat_id)
+        invite_link = await bot.create_chat_invite_link(chat_id=chat_id)
+    except (TelegramBadRequest, TelegramForbiddenError) as error:
+        logger.warning("Could not create invite link for chat %s: %s", chat_id, error)
+        await callback.answer("Не удалось создать ссылку. Проверьте права бота в чате.", show_alert=True)
+        return
+
+    await callback.answer("Ссылка создана.")
+    if callback.message:
+        title = chat.title or str(chat_id)
+        await callback.message.answer(f"Ссылка для чата «{title}»:\n{invite_link.invite_link}")
 
 
 @router.callback_query(F.data == "choose_message_chat")
