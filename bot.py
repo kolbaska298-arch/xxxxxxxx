@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -49,8 +50,12 @@ JOIN_WINDOW = timedelta(seconds=60)
 RAID_RESTRICTION = timedelta(minutes=5)
 CAPTCHA_RESTRICTION = timedelta(minutes=5)
 EMERGENCY_RESTRICTION = timedelta(minutes=5)
+MAX_BUTTON_TEXT_LENGTH = 50
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 CHAT_STORE = Path(os.getenv("CHAT_STORE", "known_chats.json"))
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
+DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 
 def utc_now() -> datetime:
@@ -84,6 +89,7 @@ known_chats: set[int] = set()
 pending_owner_message_chat: dict[int, int] = {}
 random_reply_until: dict[int, datetime] = {}
 last_random_reply: dict[int, str] = {}
+deepseek_next_reply_at: dict[int, datetime] = {}
 warning_counts: dict[tuple[int, int], int] = defaultdict(int)
 
 try:
@@ -198,6 +204,41 @@ def random_reply(chat_id: int) -> str:
             reply = random.choice(alternatives)
     last_random_reply[chat_id] = reply
     return reply
+
+
+async def deepseek_reply(message: Message) -> str | None:
+    if not DEEPSEEK_API_KEY or not message.text:
+        return None
+
+    prompt = (
+        "Ты дружелюбный Telegram-бот с мягкой фембой-манерой общения. "
+        "Отвечай по-русски, коротко и живо, иногда используй мягкие слова вроде "
+        "«милый», «солнышко» или «ой», но не флиртуй сексуально, не оскорбляй "
+        "людей и не упоминай, что ты ИИ. Ответ должен быть уместен к сообщению."
+    )
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": message.text[:2000]},
+        ],
+        "temperature": 0.9,
+        "max_tokens": 120,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                DEEPSEEK_API_URL,
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        content = data["choices"][0]["message"]["content"].strip()
+        return content or None
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+        logger.warning("Could not get DeepSeek reply: %s", error)
+        return None
 
 SUSPICIOUS_LINK_PATTERN = re.compile(
     r"(?:https?://|www\.)[^\s]+|(?:t\.me|telegram\.me|telegram\.dog)/[A-Za-z0-9_+/?=-]+",
@@ -380,12 +421,9 @@ async def activate_emergency_lockdown(bot: Bot) -> int:
 def owner_control_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Выбрать чат для сообщения", callback_data="choose_message_chat")],
-            [InlineKeyboardButton(text="Получить ссылку на чат", callback_data="choose_invite_chat")],
-            [InlineKeyboardButton(text="Опубликовать обновление", callback_data="publish_update_07")],
-            [InlineKeyboardButton(text="Выложить патч", callback_data="publish_patch_08")],
-            [InlineKeyboardButton(text="Включить экстренный режим", callback_data="emergency_on")],
-            [InlineKeyboardButton(text="Выключить экстренный режим", callback_data="emergency_off")],
+            [InlineKeyboardButton(text="Ссылка на чат", callback_data="choose_invite_chat")],
+            [InlineKeyboardButton(text="Сообщение в чат", callback_data="choose_message_chat")],
+            [InlineKeyboardButton(text="Экстренный режим", callback_data="emergency_toggle")],
         ]
     )
 
@@ -465,31 +503,35 @@ async def emergency_command_handler(message: Message, bot: Bot) -> None:
 
 
 @router.message(Command("ссылка", "link"))
-async def invite_link_command_handler(message: Message) -> None:
+async def invite_link_command_handler(message: Message, bot: Bot) -> None:
     if message.chat.type != ChatType.PRIVATE or message.from_user is None or message.from_user.id != OWNER_ID:
         return
     await message.answer(
         "Выберите чат, для которого создать ссылку:",
-        reply_markup=invite_chat_keyboard(),
+        reply_markup=await invite_chat_keyboard(bot),
     )
 
 
-def invite_chat_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"Чат {chat_id}",
-                    callback_data=f"invite_chat:{chat_id}",
-                )
-            ]
-            for chat_id in sorted(known_chats)
-        ]
-    )
+async def invite_chat_keyboard(bot: Bot) -> InlineKeyboardMarkup:
+    buttons = []
+    for chat_id in sorted(known_chats):
+        try:
+            chat = await bot.get_chat(chat_id)
+            title = chat.title or str(chat_id)
+        except (TelegramBadRequest, TelegramForbiddenError) as error:
+            logger.warning("Could not load chat %s for invite menu: %s", chat_id, error)
+            title = f"Недоступный чат ({chat_id})"
+        buttons.append([
+            InlineKeyboardButton(
+                text=title[:MAX_BUTTON_TEXT_LENGTH],
+                callback_data=f"invite_chat:{chat_id}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 @router.callback_query(F.data == "choose_invite_chat")
-async def choose_invite_chat_handler(callback: CallbackQuery) -> None:
+async def choose_invite_chat_handler(callback: CallbackQuery, bot: Bot) -> None:
     if callback.from_user is None or callback.from_user.id != OWNER_ID:
         await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
         return
@@ -500,7 +542,7 @@ async def choose_invite_chat_handler(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.answer(
             "Выберите чат, для которого создать ссылку:",
-            reply_markup=invite_chat_keyboard(),
+            reply_markup=await invite_chat_keyboard(bot),
         )
 
 
@@ -600,12 +642,13 @@ async def owner_message_handler(message: Message, bot: Bot) -> None:
         await message.answer("Не удалось отправить сообщение в выбранный чат.", reply_markup=owner_control_keyboard())
 
 
-@router.callback_query(F.data.in_({"emergency_on", "emergency_off"}))
+@router.callback_query(F.data.in_({"emergency_toggle", "emergency_on", "emergency_off"}))
 async def emergency_callback_handler(callback: CallbackQuery, bot: Bot) -> None:
     if callback.from_user is None or callback.from_user.id != OWNER_ID:
         await callback.answer("Кнопка доступна только владельцу.", show_alert=True)
         return
-    if callback.data == "emergency_on":
+    emergency_is_active = bool(emergency_until)
+    if callback.data == "emergency_on" or (callback.data == "emergency_toggle" and not emergency_is_active):
         count = await activate_emergency_lockdown(bot)
         await callback.answer("Экстренный режим включён.")
         if callback.message:
@@ -1155,10 +1198,14 @@ async def content_handler(message: Message, bot: Bot) -> None:
             await mute_user(bot, message, 5, "повторял одно и то же сообщение")
             return
 
-    reply_allowed_at = random_reply_until.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc))
-    if message.text and now >= reply_allowed_at and random.random() < RANDOM_REPLY_PROBABILITY:
-        await message.reply(random_reply(message.chat.id))
-        random_reply_until[message.chat.id] = now + RANDOM_REPLY_COOLDOWN
+    reply_allowed_at = deepseek_next_reply_at.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc))
+    if message.text and now >= reply_allowed_at:
+        reply = await deepseek_reply(message)
+        if reply is None and not DEEPSEEK_API_KEY:
+            reply = random_reply(message.chat.id)
+        if reply:
+            await message.reply(reply)
+        deepseek_next_reply_at[message.chat.id] = now + timedelta(seconds=random.randint(240, 300))
 
     if message.poll is not None and message.poll.type == "quiz":
         sticker_events.pop(key, None)
