@@ -206,8 +206,8 @@ def random_reply(chat_id: int) -> str:
     return reply
 
 
-async def deepseek_reply(message: Message) -> str | None:
-    if not DEEPSEEK_API_KEY or not message.text:
+async def deepseek_reply(text: str) -> str | None:
+    if not DEEPSEEK_API_KEY or not text:
         return None
 
     prompt = (
@@ -220,7 +220,7 @@ async def deepseek_reply(message: Message) -> str | None:
         "model": DEEPSEEK_MODEL,
         "messages": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": message.text[:2000]},
+            {"role": "user", "content": text[:2000]},
         ],
         "temperature": 0.9,
         "max_tokens": 120,
@@ -481,6 +481,7 @@ async def help_handler(message: Message) -> None:
         "Anti-graviti\n\n"
         "/start - запустить бота\n"
         "/help - список команд\n"
+        "/ai текст - задать вопрос DeepSeek\n"
         "/тестприветствие - проверить приветствие в группе\n"
         "/баненые - список активных мутов\n\n"
         "Администратор может ответить командами /warn, /warnings или /unwarn на сообщение участника. После пяти предупреждений участник блокируется.\n\n"
@@ -500,6 +501,26 @@ async def emergency_command_handler(message: Message, bot: Bot) -> None:
         "Экстренное управление группами:",
         reply_markup=owner_control_keyboard(),
     )
+
+
+@router.message(Command("ai"))
+async def ai_command_handler(message: Message) -> None:
+    if not is_group(message):
+        return
+    prompt = (message.text or "").partition(" ")[2].strip()
+    if not prompt and message.reply_to_message and message.reply_to_message.text:
+        prompt = message.reply_to_message.text.strip()
+    if not prompt:
+        await message.answer("Использование: /ai ваш вопрос или ответьте /ai на текст сообщения.")
+        return
+    if not DEEPSEEK_API_KEY:
+        await message.answer("DeepSeek не настроен: добавьте переменную DEEPSEEK_API_KEY.")
+        return
+    reply = await deepseek_reply(prompt)
+    if reply is None:
+        await message.answer("Не удалось получить ответ от DeepSeek. Попробуйте позже.")
+        return
+    await message.reply(reply)
 
 
 @router.message(Command("ссылка", "link"))
@@ -1200,7 +1221,7 @@ async def content_handler(message: Message, bot: Bot) -> None:
 
     reply_allowed_at = deepseek_next_reply_at.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc))
     if message.text and now >= reply_allowed_at:
-        reply = await deepseek_reply(message)
+        reply = await deepseek_reply(message.text)
         if reply is None and not DEEPSEEK_API_KEY:
             reply = random_reply(message.chat.id)
         if reply:
