@@ -1282,8 +1282,13 @@ async def content_handler(message: Message, bot: Bot) -> None:
             await mute_user(bot, message, 5, "повторял одно и то же сообщение")
             return
 
+    replied_to_bot = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.id == bot.id
+    )
     reply_allowed_at = deepseek_next_reply_at.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc))
-    if message.text and now >= reply_allowed_at:
+    if message.text and (replied_to_bot or now >= reply_allowed_at):
         reply = await deepseek_reply(message.text)
         if reply is None and not DEEPSEEK_API_KEY:
             reply = random_reply(message.chat.id)
