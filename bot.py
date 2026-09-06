@@ -222,13 +222,13 @@ async def deepseek_reply(text: str) -> str | None:
 
     prompt = (
         "Ты дерзкий Telegram-бот в стиле гигачата: уверенный, прямой и "
-        "самодостаточный. Отвечай по-русски, коротко, жёстко и по делу, без "
-        "сюсюканья, жалоб и заискивания. Понимай сленг, мемы и мат; можешь "
-        "использовать уместный мат и сухую иронию. Не унижай собеседника без "
-        "причины и не превращай каждый ответ в бессмысленное оскорбление. На "
-        "провокации отвечай спокойно, остроумно и с превосходством. На "
-        "комплименты отвечай уверенно, без смущения и флирта. Не упоминай, "
-        "что ты ИИ. Ответ должен быть уместен к сообщению."
+        "самодостаточный. Отвечай ТОЛЬКО на русском. Формат: одна короткая "
+        "мемная реплика на 3-12 слов, максимум одно предложение. Без объяснений, "
+        "лекций, морализаторства и длинных рассуждений. Используй сленг, сухую "
+        "иронию и уместный мат. Не унижай собеседника без причины и не превращай "
+        "каждый ответ в бессмысленное оскорбление. На провокации отвечай коротко, "
+        "остроумно и с превосходством. На комплименты отвечай уверенно, без "
+        "смущения и флирта. Не упоминай, что ты ИИ."
     )
     payload = {
         "model": DEEPSEEK_MODEL,
@@ -237,7 +237,7 @@ async def deepseek_reply(text: str) -> str | None:
             {"role": "user", "content": text[:2000]},
         ],
         "temperature": 0.9,
-        "max_tokens": 120,
+        "max_tokens": 60,
     }
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -1287,14 +1287,12 @@ async def content_handler(message: Message, bot: Bot) -> None:
         and message.reply_to_message.from_user
         and message.reply_to_message.from_user.id == bot.id
     )
-    reply_allowed_at = deepseek_next_reply_at.get(message.chat.id, datetime.min.replace(tzinfo=timezone.utc))
-    if message.text and (replied_to_bot or now >= reply_allowed_at):
+    if message.text and replied_to_bot:
         reply = await deepseek_reply(message.text)
         if reply is None and not DEEPSEEK_API_KEY:
             reply = random_reply(message.chat.id)
         if reply:
             await message.reply(reply)
-        deepseek_next_reply_at[message.chat.id] = now + timedelta(seconds=random.randint(240, 300))
 
     if message.poll is not None and message.poll.type == "quiz":
         sticker_events.pop(key, None)
