@@ -96,6 +96,7 @@ pending_owner_message_chat: dict[int, int] = {}
 random_reply_until: dict[int, datetime] = {}
 last_random_reply: dict[int, str] = {}
 deepseek_next_reply_at: dict[int, datetime] = {}
+ai_disabled_chats: set[int] = set()
 deepseek_last_error = ""
 warning_counts: dict[tuple[int, int], int] = defaultdict(int)
 
@@ -222,13 +223,15 @@ async def deepseek_reply(text: str) -> str | None:
 
     prompt = (
         "Ты дерзкий Telegram-бот в стиле гигачата: уверенный, прямой и "
-        "самодостаточный. Отвечай ТОЛЬКО на русском. Формат: одна короткая "
-        "мемная реплика на 3-12 слов, максимум одно предложение. Без объяснений, "
-        "лекций, морализаторства и длинных рассуждений. Используй сленг, сухую "
+        "самодостаточный. Твоя задача: прочитать сообщение пользователя и сразу "
+        "выдать готовую ответку. Отвечай ТОЛЬКО на русском. Формат: одна короткая "
+        "мемная реплика на 3-12 слов, максимум одно предложение. Запрещены английский, "
+        "перевод, анализ, рассуждения, объяснение смысла, описание роли и фразы "
+        "вроде «пользователь спрашивает» или «я не могу». Используй сленг, сухую "
         "иронию и уместный мат. Не унижай собеседника без причины и не превращай "
-        "каждый ответ в бессмысленное оскорбление. На провокации отвечай коротко, "
-        "остроумно и с превосходством. На комплименты отвечай уверенно, без "
-        "смущения и флирта. Не упоминай, что ты ИИ."
+        "каждый ответ в бессмысленное оскорбление. На любой вопрос или провокацию "
+        "отвечай по смыслу коротко и мемно. Однословные провокации вроде «сосал?» "
+        "понимай как шутку или наезд, а не переводи буквально. Не упоминай, что ты ИИ."
     )
     payload = {
         "model": DEEPSEEK_MODEL,
@@ -284,9 +287,6 @@ async def deepseek_reply(text: str) -> str | None:
                 for part in content
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
-        if not isinstance(content, str) or not content.strip():
-            reasoning = message_data.get("reasoning") if isinstance(message_data, dict) else None
-            content = reasoning if isinstance(reasoning, str) else None
         if not isinstance(content, str):
             logger.warning("DeepSeek response has invalid content: %s", data)
             deepseek_last_error = "API вернул ответ неизвестного формата"
@@ -564,10 +564,21 @@ async def emergency_command_handler(message: Message, bot: Bot) -> None:
 
 
 @router.message(Command("ai"))
-async def ai_command_handler(message: Message) -> None:
+async def ai_command_handler(message: Message, bot: Bot) -> None:
     if not is_group(message):
         return
     prompt = (message.text or "").partition(" ")[2].strip()
+    command = prompt.casefold()
+    if command in {"start", "stop"}:
+        if not await is_moderator_or_creator(bot, message):
+            return
+        if command == "start":
+            ai_disabled_chats.discard(message.chat.id)
+            await message.answer("AI включён. Отвечаю на реплаи к моим сообщениям.")
+        else:
+            ai_disabled_chats.add(message.chat.id)
+            await message.answer("AI выключен. Генерация ответов остановлена.")
+        return
     if not prompt and message.reply_to_message and message.reply_to_message.text:
         prompt = message.reply_to_message.text.strip()
     if not prompt:
@@ -1221,6 +1232,19 @@ async def bot_insult_handler(message: Message) -> None:
     await message.answer(random.choice(INSULT_REPLIES))
 
 
+SINGLE_WORD_PROVOCATION_REPLIES = (
+    "Нет. Следующий вопрос, чемпион.",
+    "Мимо. Придумай наезд поумнее.",
+    "Не дождёшься. Слабый заход.",
+    "Смешно. Но нет.",
+)
+
+
+@router.message(F.text.casefold().in_({"сосал", "сосал?", "сосал!"}))
+async def single_word_provocation_handler(message: Message) -> None:
+    await message.answer(random.choice(SINGLE_WORD_PROVOCATION_REPLIES))
+
+
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
 async def content_handler(message: Message, bot: Bot) -> None:
     if message.from_user is None:
@@ -1287,7 +1311,7 @@ async def content_handler(message: Message, bot: Bot) -> None:
         and message.reply_to_message.from_user
         and message.reply_to_message.from_user.id == bot.id
     )
-    if message.text and replied_to_bot:
+    if message.text and replied_to_bot and message.chat.id not in ai_disabled_chats:
         reply = await deepseek_reply(message.text)
         if reply is None and not DEEPSEEK_API_KEY:
             reply = random_reply(message.chat.id)
