@@ -93,6 +93,7 @@ pending_owner_message_chat: dict[int, int] = {}
 random_reply_until: dict[int, datetime] = {}
 last_random_reply: dict[int, str] = {}
 deepseek_next_reply_at: dict[int, datetime] = {}
+deepseek_last_error = ""
 warning_counts: dict[tuple[int, int], int] = defaultdict(int)
 
 try:
@@ -210,7 +211,10 @@ def random_reply(chat_id: int) -> str:
 
 
 async def deepseek_reply(text: str) -> str | None:
+    global deepseek_last_error
+    deepseek_last_error = ""
     if not DEEPSEEK_API_KEY or not text:
+        deepseek_last_error = "API-ключ не настроен"
         return None
 
     prompt = (
@@ -256,20 +260,27 @@ async def deepseek_reply(text: str) -> str | None:
                     response.status_code,
                     error_details[:500],
                 )
+                deepseek_last_error = f"ошибка API {response.status_code}"
                 return None
 
             data = response.json()
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             logger.warning("DeepSeek response has no choices: %s", data)
+            deepseek_last_error = "API вернул пустой ответ"
             return None
         content = choices[0].get("message", {}).get("content")
         if not isinstance(content, str):
             logger.warning("DeepSeek response has invalid content: %s", data)
+            deepseek_last_error = "API вернул ответ неизвестного формата"
             return None
-        return content.strip() or None
+        content = content.strip()
+        if not content:
+            deepseek_last_error = "API вернул пустой текст"
+        return content or None
     except (httpx.HTTPError, TypeError, ValueError) as error:
         logger.warning("Could not get DeepSeek reply: %s", error)
+        deepseek_last_error = "ошибка соединения с API"
         return None
 
 SUSPICIOUS_LINK_PATTERN = re.compile(
@@ -550,7 +561,10 @@ async def ai_command_handler(message: Message) -> None:
         return
     reply = await deepseek_reply(prompt)
     if reply is None:
-        await message.answer("Не удалось получить ответ от DeepSeek. Попробуйте позже.")
+        await message.answer(
+            f"DeepSeek не ответил: {deepseek_last_error or 'неизвестная ошибка'}. "
+            "Проверьте переменную DEEPSEEK_API_KEY и логи Railway."
+        )
         return
     await message.reply(reply)
 
