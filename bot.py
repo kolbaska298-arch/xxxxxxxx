@@ -56,9 +56,12 @@ CHAT_STORE = Path(os.getenv("CHAT_STORE", "known_chats.json"))
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip().strip('"\'')
 DEEPSEEK_API_URL = os.getenv(
     "DEEPSEEK_API_URL",
-    "https://api.deepseek.com/chat/completions",
+    "https://openrouter.ai/api/v1/chat/completions",
 ).strip()
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
+DEEPSEEK_MODEL = os.getenv(
+    "DEEPSEEK_MODEL",
+    "inclusionai/ling-3.0-flash-sante:free",
+).strip()
 
 
 def utc_now() -> datetime:
@@ -269,7 +272,17 @@ async def deepseek_reply(text: str) -> str | None:
             logger.warning("DeepSeek response has no choices: %s", data)
             deepseek_last_error = "API вернул пустой ответ"
             return None
-        content = choices[0].get("message", {}).get("content")
+        message_data = choices[0].get("message", {})
+        content = message_data.get("content") if isinstance(message_data, dict) else None
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        if not isinstance(content, str) or not content.strip():
+            reasoning = message_data.get("reasoning") if isinstance(message_data, dict) else None
+            content = reasoning if isinstance(reasoning, str) else None
         if not isinstance(content, str):
             logger.warning("DeepSeek response has invalid content: %s", data)
             deepseek_last_error = "API вернул ответ неизвестного формата"
