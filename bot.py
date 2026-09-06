@@ -53,9 +53,12 @@ EMERGENCY_RESTRICTION = timedelta(minutes=5)
 MAX_BUTTON_TEXT_LENGTH = 50
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 CHAT_STORE = Path(os.getenv("CHAT_STORE", "known_chats.json"))
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
-DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip().strip('"\'')
+DEEPSEEK_API_URL = os.getenv(
+    "DEEPSEEK_API_URL",
+    "https://api.deepseek.com/chat/completions",
+).strip()
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
 
 
 def utc_now() -> datetime:
@@ -226,17 +229,46 @@ async def deepseek_reply(text: str) -> str | None:
         "max_tokens": 120,
     }
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                DEEPSEEK_API_URL,
-                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
-                json=payload,
-            )
-            response.raise_for_status()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            for attempt in range(2):
+                response = await client.post(
+                    DEEPSEEK_API_URL,
+                    headers={
+                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                if response.status_code not in {408, 429} and response.status_code < 500:
+                    break
+                if attempt == 0:
+                    await asyncio.sleep(1)
+
+            if response.is_error:
+                try:
+                    error_body = response.json()
+                    error = error_body.get("error") if isinstance(error_body, dict) else None
+                    error_details = error.get("message") if isinstance(error, dict) else response.text
+                except (TypeError, ValueError):
+                    error_details = response.text
+                logger.warning(
+                    "DeepSeek API returned %s: %s",
+                    response.status_code,
+                    error_details[:500],
+                )
+                return None
+
             data = response.json()
-        content = data["choices"][0]["message"]["content"].strip()
-        return content or None
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            logger.warning("DeepSeek response has no choices: %s", data)
+            return None
+        content = choices[0].get("message", {}).get("content")
+        if not isinstance(content, str):
+            logger.warning("DeepSeek response has invalid content: %s", data)
+            return None
+        return content.strip() or None
+    except (httpx.HTTPError, TypeError, ValueError) as error:
         logger.warning("Could not get DeepSeek reply: %s", error)
         return None
 
